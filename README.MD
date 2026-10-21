@@ -141,8 +141,8 @@ flowchart LR
 | DeepSeek PoW | 纯 Go 高性能实现（DeepSeekHashV1），毫秒级响应；仅用于 `/chat/completion`（`continue` / `resume_stream` 按网页端行为不带 PoW） |
 | 空回复恢复 | 上游返回 `FINISHED` 但没有任何正文/思考/工具调用时，先按网页端行为用 `/chat/resume_stream` 重读该消息，仍为空才走原有空输出补偿重试 |
 | Tool Calling | 防泄漏处理：非代码块高置信特征识别、`delta.tool_calls` 早发、结构化增量输出；同时兼容 EPSE、旧式 canonical XML、网页端 DSML（`<｜｜DSML｜｜ calls>`）与 `<tool_call>{JSON}` 四种调用格式 |
-| Admin API | 配置管理、运行时设置热更新、代理管理、账号测试 / 批量测试、会话清理、导入导出、Vercel 同步、版本检查 |
-| WebUI 管理台 | `/admin` 单页应用（中英文双语、深色模式，支持查看服务器端对话记录） |
+| Admin API | 配置管理、运行时设置热更新、代理管理、账号测试 / 批量测试、会话清理、导入导出、Vercel 同步、版本检查、登录风控状态（`GET /admin/signin-risk`，可手动解除冷却） |
+| WebUI 管理台 | `/admin` 单页应用（中英文双语、深色模式，支持查看服务器端对话记录）。账号页直接呈现每个号的会话状态：`refresh_error` / 连续失败次数 / 本地冷却到期时间，并提供「导入会话令牌」（粘贴 `userToken`，绕开密码登录）、单个与批量「重新登录」、登录风控横幅（说明为什么可用账号为 0，可一键立即重试）；设置页可热更新 `hif_tokens`、`warm_up_on_startup`、`persist_tokens` |
 | 运维探针 | `GET /healthz`（存活）、`GET /readyz`（就绪） |
 
 OpenAI `/v1/*` 仍是推荐的规范路径；同时支持 `/models`、`/chat/completions`、`/responses`、`/embeddings`、`/files`、`/files/{file_id}` 等根路径快捷路由，方便只配置 DS2API 根地址的第三方客户端。
@@ -341,7 +341,7 @@ go run ./cmd/ds2api
 - `keys` / `api_keys`：客户端访问密钥，`api_keys` 支持 `name` 与 `remark` 元信息，`keys` 继续兼容。
 - `accounts`：DeepSeek 托管账号，支持 `email` 或 `mobile` 登录，可配置代理、名称和备注。
 - `model_aliases`：OpenAI / Claude / Gemini 共用的模型 alias 映射。
-- `runtime`：账号并发、队列、token 刷新策略、风控令牌回传（`hif_tokens`）与启动预热（`warm_up_on_startup`），可通过 Admin Settings 热更新。
+- `runtime`：账号并发、队列、token 刷新策略、风控令牌回传（`hif_tokens`）、启动预热（`warm_up_on_startup`）与令牌落盘（`persist_tokens`，默认关闭），可通过 Admin Settings 热更新。
 - `auto_delete.mode`：请求结束后的远端会话清理策略，支持 `none` / `single` / `all`。
 - `current_input_file`：全局生效的上下文拆分上传策略；默认关闭，开启且阈值为 `0` 时，触发时将完整上下文合并上传为 `DS2API_HISTORY.txt` 上下文文件。expert（pro）模型不支持文件上传，即使开启此选项也不会生成 `DS2API_HISTORY.txt`，客户端传入的文件引用也会被忽略。
 - 如果关闭 `current_input_file`，请求会直接透传，不上传拆分上下文文件。

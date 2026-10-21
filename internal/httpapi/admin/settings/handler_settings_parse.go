@@ -85,6 +85,10 @@ func parseSettingsUpdateRequest(req map[string]any) (*config.AdminConfig, *confi
 			enabled := boolFrom(v)
 			cfg.WarmUpOnStartup = &enabled
 		}
+		if v, exists := raw["persist_tokens"]; exists {
+			enabled := boolFrom(v)
+			cfg.PersistTokens = &enabled
+		}
 		if cfg.AccountMaxInflight > 0 && cfg.GlobalMaxInflight > 0 && cfg.GlobalMaxInflight < cfg.AccountMaxInflight {
 			return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("runtime.global_max_inflight must be >= runtime.account_max_inflight")
 		}

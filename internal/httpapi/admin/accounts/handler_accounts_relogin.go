@@ -11,6 +11,7 @@ package accounts
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"time"
@@ -61,10 +62,14 @@ func (h *Handler) reloginAccount(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	if err := refresher.RefreshAccountToken(ctx, acc, "manual"); err != nil {
+		// `risk_cooldown` tells the console that the sign-in circuit breaker — not
+		// this account — is what refused, so the UI can say "wait" instead of
+		// suggesting the password is wrong.
 		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"detail":     "重新登录失败：" + err.Error(),
-			"terminal":   auth.IsTerminalLoginError(err),
-			"identifier": acc.Identifier(),
+			"detail":        "重新登录失败：" + err.Error(),
+			"terminal":      auth.IsTerminalLoginError(err),
+			"risk_cooldown": errors.Is(err, auth.ErrRiskCooldown),
+			"identifier":    acc.Identifier(),
 		})
 		return
 	}

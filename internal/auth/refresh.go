@@ -46,6 +46,11 @@ const (
 	// scheduledRefreshSpacing keeps a sweep over many accounts from looking like
 	// a burst of sign-ins: accounts are refreshed one after another.
 	scheduledRefreshSpacing = 300 * time.Millisecond
+	// verificationParkWindow is how long an account is parked when upstream asks
+	// for a human device verification (codes 13/14). It is generous on purpose:
+	// the operator has to sign in from a browser and paste the token, and the
+	// account must not be re-asked in the meantime.
+	verificationParkWindow = time.Hour
 )
 
 // refreshGate is the per-account single-flight lock.
@@ -203,6 +208,16 @@ func (r *Resolver) recordRefreshFailure(a *RequestAuth, err error) {
 				"account", identifier, "until", until.UTC().Format(time.RFC3339))
 			r.applyAccountCooldown(identifier, until, reason)
 			return
+		case LoginCodeSignature, LoginCodeOTP:
+			// The account is fine; the device is not verified. Only a person can
+			// clear that (browser sign-in → import token), so park it long enough
+			// that a burst of requests cannot keep re-asking, and record the step
+			// the operator has to take.
+			until := time.Now().Add(verificationParkWindow)
+			config.Logger.Warn("[token_refresh] upstream requires human device verification, parking the account",
+				"account", identifier, "code", loginErr.Code, "until", until.UTC().Format(time.RFC3339))
+			r.applyAccountCooldown(identifier, until, reason)
+			return
 		}
 		config.Logger.Warn("[token_refresh] account refused at sign-in, disabling it",
 			"account", identifier, "code", loginErr.Code, "reason", reason)
@@ -246,6 +261,12 @@ func loginDisableReason(loginErr *LoginError) string {
 		return "账户已被停用（USER_IS_BANNED）"
 	case LoginCodeDevice:
 		return "设备校验未通过（device_id 可能已被标记）"
+	case LoginCodeMobileRestricted:
+		return "该手机号/通道被限制登录（MOBILE_RESTRICTED，需人工处理）"
+	case LoginCodeSignature:
+		return "上游要求设备签名验证（SIGNATURE_REQUIRED）：请用浏览器登录该账号后「导入令牌」"
+	case LoginCodeOTP:
+		return "上游要求验证码验证（OTP_REQUIRED）：请用浏览器登录该账号后「导入令牌」"
 	default:
 		return "登录被拒：" + loginErr.Message
 	}
@@ -300,6 +321,11 @@ func (r *Resolver) disableAccountForRefresh(identifier, reason string, banned bo
 }
 
 // ClearRefreshBlocked re-enables an account after a successful manual sign-in.
+//
+// It also drops the local cooldown: a refused sign-in parks an account with
+// `CooldownUntil` set, and the pool skips parked accounts. Clearing the failure
+// bookkeeping but leaving the cooldown in place would make a successful manual
+// re-login look like a fix while the account stayed out of rotation.
 func (r *Resolver) ClearRefreshBlocked(identifier string) error {
 	if r == nil || r.Store == nil {
 		return errNoAccountID
@@ -319,6 +345,7 @@ func (r *Resolver) ClearRefreshBlocked(identifier string) error {
 			c.Accounts[i].RefreshFailures = 0
 			c.Accounts[i].RefreshError = ""
 			c.Accounts[i].RefreshRetryAt = 0
+			c.Accounts[i].CooldownUntil = 0
 			break
 		}
 		if c.ElasticPool.Enabled {

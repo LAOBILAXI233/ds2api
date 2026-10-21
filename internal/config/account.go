@@ -16,6 +16,11 @@ const (
 	PoolTypeToolsOnly = "tools_only"
 )
 
+// Identifier 是账号在配置里、API 路径里和管理台里被引用的名字。
+//
+// 邮箱优先、手机号其次；两者都没有时退到上游账号 id。这条回退是为「导入令牌」
+// 设的：上游返回的邮箱是打码的（如 ryona******@…），打码值既不能当标识，也不能
+// 用来匹配已有账号，而账号 id 是稳定的明文。
 func (a Account) Identifier() string {
 	if strings.TrimSpace(a.Email) != "" {
 		return strings.TrimSpace(a.Email)
@@ -23,7 +28,20 @@ func (a Account) Identifier() string {
 	if mobile := NormalizeMobileForStorage(a.Mobile); mobile != "" {
 		return mobile
 	}
+	if id := strings.TrimSpace(a.UserID); id != "" {
+		return "user:" + id
+	}
 	return ""
+}
+
+// IsMaskedIdentifier reports whether upstream handed back a masked value
+// (e.g. "ryona******@example.com") rather than the real one.
+//
+// /users/current and /users/register both mask the email and mobile number, so a
+// pasted-token import cannot learn the real address. Anything derived from those
+// fields has to be checked with this first.
+func IsMaskedIdentifier(value string) bool {
+	return strings.Contains(value, "*")
 }
 
 // IsEnabled reports whether the account is eligible for scheduling.

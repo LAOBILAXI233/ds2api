@@ -150,7 +150,9 @@ Gemini 兼容客户端还可以使用 `x-goog-api-key`、`?key=` 或 `?api_key=`
 | GET | `/admin/accounts` | Admin | 分页账号列表 |
 | POST | `/admin/accounts` | Admin | 添加账号 |
 | POST | `/admin/accounts/import-token` | Admin | 用网页端 `userToken` 导入/更新账号（先校验有效性） |
-| POST | `/admin/accounts/{identifier}/relogin` | Admin | 立即重新登录该账号（单飞；成功后可解除刷新失败造成的停用） |
+| POST | `/admin/accounts/{identifier}/relogin` | Admin | 立即重新登录该账号（单飞；成功后可解除刷新失败造成的停用；被风控拒绝时返回 `risk_cooldown: true`） |
+| GET | `/admin/signin-risk` | Admin | 登录风控熔断状态（`active`/`until`/`remaining_seconds`/`strikes`） |
+| POST | `/admin/signin-risk/clear` | Admin | 手动解除登录冷却，让下一次请求立刻重试登录 |
 | PUT | `/admin/accounts/{identifier}` | Admin | 更新账号 name/remark |
 | DELETE | `/admin/accounts/{identifier}` | Admin | 删除账号 |
 | PUT | `/admin/accounts/{identifier}/proxy` | Admin | 为账号绑定/解绑代理 |
@@ -771,7 +773,7 @@ data: {"type":"message_stop"}
 
 - `success`
 - `admin`（`has_password_hash`、`jwt_expire_hours`、`jwt_valid_after_unix`、`default_password_warning`）
-- `runtime`（`account_max_inflight`、`account_max_queue`、`global_max_inflight`、`token_refresh_interval_hours`、`hif_tokens`、`warm_up_on_startup`；后两者为布尔值，默认均为 `true`）
+- `runtime`（`account_max_inflight`、`account_max_queue`、`global_max_inflight`、`token_refresh_interval_hours`、`hif_tokens`、`warm_up_on_startup`、`persist_tokens`；`hif_tokens` 与 `warm_up_on_startup` 默认 `true`，`persist_tokens` 默认 `false`）
 - `responses` / `embeddings`
 - `auto_delete`（`mode`：`none` / `single` / `all`；旧配置 `sessions=true` 仍按 `all` 处理）
 - `current_input_file`（`enabled` 默认返回 `false`、`min_chars`）
@@ -787,7 +789,7 @@ data: {"type":"message_stop"}
 热更新运行时设置。支持更新：
 
 - `admin.jwt_expire_hours`
-- `runtime.account_max_inflight` / `runtime.account_max_queue` / `runtime.global_max_inflight` / `runtime.token_refresh_interval_hours` / `runtime.hif_tokens` / `runtime.warm_up_on_startup`
+- `runtime.account_max_inflight` / `runtime.account_max_queue` / `runtime.global_max_inflight` / `runtime.token_refresh_interval_hours` / `runtime.hif_tokens` / `runtime.warm_up_on_startup` / `runtime.persist_tokens`
 - `responses.store_ttl_seconds`
 - `embeddings.provider`
 - `auto_delete.mode`
@@ -916,7 +918,11 @@ data: {"type":"message_stop"}
 
 ### `POST /admin/accounts/import-token`
 
-用网页端会话令牌（`userToken`）直接导入账号，无需密码。服务端先用 `GET /api/v0/users/current` 校验令牌是否仍然有效，并用返回的邮箱 / 手机号作为账号标识；同标识账号已存在时只替换令牌（并清除此前 `USER_IS_BANNED` 留下的停用标记）。
+用网页端会话令牌（`userToken`）直接导入账号，无需密码。服务端先用 `GET /api/v0/users/current` 校验令牌是否仍然有效，并用返回的邮箱 / 手机号作为账号标识；同标识账号已存在时只替换令牌，并清除此前留下的停用 / 封禁 / 冷却标记（令牌刚验证过，说明账号可用）。
+
+这是登录被风控拒绝时唯一还能恢复业务的通道：它不经过 `POST /users/login`，因此不会触发设备风险判定。
+
+> 没有密码、只靠导入令牌存在的账号，其令牌**不会被清出 config.json**（见 `runtime.persist_tokens` 的说明）：它的令牌就是唯一凭证，清掉等于重启后账号消失。有密码的账号仍然默认不落盘。
 
 ```json
 {"token": "网页端 userToken", "name": "可选名称", "remark": "可选备注", "locale": "zh_CN"}
@@ -954,7 +960,25 @@ JSON.parse(localStorage.getItem("userToken")).value
 {"success": true, "identifier": "user@example.com", "disabled": false, "disabled_reason": "", "banned": false, "token_refreshed": true, "refresh_failures": 0}
 ```
 
-> 账号列表（`GET /admin/accounts`）同时返回 `token_refreshed_at`、`refresh_failures`、`refresh_error`、`refresh_retry_at`，用于判断"为什么这个号停用了"。
+> 账号列表（`GET /admin/accounts`）同时返回 `token_refreshed_at`、`refresh_failures`、`refresh_error`、`refresh_retry_at`、`cooldown_until`，用于判断"为什么这个号停用了"。
+>
+> `cooldown_until`（Unix 秒）是网关自己设的冷却：设备风险 / 禁言这类拒绝只让账号"停车"，到期自动回到调度；`muted_until` 才是上游下发的禁言时间。
+
+### `GET /admin/signin-risk`
+
+登录风控熔断状态。上游一旦以 `RISK_DEVICE_DETECTED` 拒绝登录，网关会停止一切登录尝试（窗口 10 分钟起、连击翻倍、上限 2 小时）。管理台用它解释"为什么可用账号是 0"。
+
+```json
+{"success": true, "supported": true, "active": true, "strikes": 2, "remaining_seconds": 720, "until": "2026-10-21T12:00:00Z"}
+```
+
+`active=false` 时 `until` 省略。运行环境没有熔断器时返回 `supported: false`。
+
+### `POST /admin/signin-risk/clear`
+
+手动解除登录冷却，让下一次请求立刻重试登录（换出口 IP / 给账号配好代理之后用）。不重置连击计数——手动重试一次不应该让下一次拒绝又回到 10 分钟。
+
+**响应**：`{"success": true}`
 
 ### `PUT /admin/accounts/{identifier}`
 

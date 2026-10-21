@@ -28,6 +28,7 @@ func (h *Handler) getSettings(w http.ResponseWriter, _ *http.Request) {
 			"token_refresh_interval_hours": h.Store.RuntimeTokenRefreshIntervalHours(),
 			"hif_tokens":                   hifTokensEnabled(snap),
 			"warm_up_on_startup":           warmUpOnStartup(snap),
+			"persist_tokens":               snap.TokensPersist(),
 		},
 		"responses":   snap.Responses,
 		"embeddings":  snap.Embeddings,

@@ -12,7 +12,15 @@ const MAX_AUTO_FETCH_FAILURES = 3
 
 const DEFAULT_FORM = {
     admin: { jwt_expire_hours: 24 },
-    runtime: { account_max_inflight: 2, account_max_queue: 10, global_max_inflight: 10, token_refresh_interval_hours: 6 },
+    runtime: {
+        account_max_inflight: 2,
+        account_max_queue: 10,
+        global_max_inflight: 10,
+        token_refresh_interval_hours: 6,
+        hif_tokens: true,
+        warm_up_on_startup: true,
+        persist_tokens: false,
+    },
     responses: { store_ttl_seconds: 900 },
     embeddings: { provider: '' },
     auto_delete: { mode: 'none' },
@@ -60,6 +68,9 @@ function fromServerForm(data) {
             account_max_queue: Number(data.runtime?.account_max_queue || 10),
             global_max_inflight: Number(data.runtime?.global_max_inflight || 10),
             token_refresh_interval_hours: Number(data.runtime?.token_refresh_interval_hours || 6),
+            hif_tokens: data.runtime?.hif_tokens !== false,
+            warm_up_on_startup: data.runtime?.warm_up_on_startup !== false,
+            persist_tokens: data.runtime?.persist_tokens === true,
         },
         responses: {
             store_ttl_seconds: Number(data.responses?.store_ttl_seconds || 900),
@@ -99,6 +110,9 @@ function toServerPayload(form) {
             account_max_queue: Number(form.runtime.account_max_queue),
             global_max_inflight: Number(form.runtime.global_max_inflight),
             token_refresh_interval_hours: Number(form.runtime.token_refresh_interval_hours),
+            hif_tokens: Boolean(form.runtime.hif_tokens ?? true),
+            warm_up_on_startup: Boolean(form.runtime.warm_up_on_startup ?? true),
+            persist_tokens: Boolean(form.runtime.persist_tokens ?? false),
         },
         responses: { store_ttl_seconds: Number(form.responses.store_ttl_seconds) },
         embeddings: { provider: String(form.embeddings.provider || '').trim() },

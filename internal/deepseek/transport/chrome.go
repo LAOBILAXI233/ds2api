@@ -13,7 +13,12 @@ import (
 // of real users sit within a few versions of latest, so a stale User-Agent is
 // itself an anomaly — and it is the cheapest thing in the world for a server to
 // check.
-const ChromeMajorVersion = "150"
+//
+// 155 comes from the 2026-10 capture of a full sign-up → chat flow (HAR): the
+// browser advertised "Google Chrome";v="155" in sec-ch-ua while the project was
+// still claiming 150. Being five majors behind latest while also being the
+// single client that logs in from this host is a correlation nobody needs.
+const ChromeMajorVersion = "155"
 
 // TLSChromeVersion is the Chrome generation the uTLS ClientHello reproduces.
 //

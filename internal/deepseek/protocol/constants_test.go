@@ -202,14 +202,30 @@ func TestTimezoneAndLanguageDerivedFromLocale(t *testing.T) {
 	}
 }
 
-func TestLoginHeadersUseConservativeAppStyle(t *testing.T) {
+// Sign-in must look exactly like the rest of the traffic. It used to go out with
+// an App-style header set while claiming `x-client-platform: web` over a Chrome
+// TLS handshake — a contradiction on the one request that runs the device risk
+// check. A real capture of the web client's /users/register (2026-10) shows the
+// browser's full header set.
+func TestLoginHeadersMatchBrowserTraffic(t *testing.T) {
 	headers := LoginHeaders("zh_CN")
-	if headers["User-Agent"] != "DeepSeek/"+ClientVersion {
-		t.Fatalf("expected App User-Agent for login, got %q", headers["User-Agent"])
+	if strings.HasPrefix(headers["User-Agent"], "DeepSeek/") {
+		t.Fatalf("login must not claim to be the App, got User-Agent %q", headers["User-Agent"])
 	}
-	for _, h := range []string{"sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform", "sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "Referer", "Origin", "Accept-Language"} {
-		if _, ok := headers[h]; ok {
-			t.Fatalf("unexpected browser header in login headers: %s", h)
+	if !strings.Contains(headers["User-Agent"], "Chrome") {
+		t.Fatalf("expected a Chrome User-Agent on login, got %q", headers["User-Agent"])
+	}
+	// The cross-layer invariant: whatever the rest of the traffic sends, login
+	// sends too. Drift here is exactly what made the two paths disagree.
+	base := BuildBaseHeaders(normalizeClientConstants(sharedClient), sharedBaseHeaderOverrides)
+	for key, want := range base {
+		if got := headers[key]; got != want {
+			t.Fatalf("login header %s = %q, base traffic sends %q", key, got, want)
+		}
+	}
+	for _, h := range []string{"sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform", "sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "Accept-Language", "x-client-bundle-id"} {
+		if _, ok := headers[h]; !ok {
+			t.Fatalf("missing browser header on login: %s", h)
 		}
 	}
 	if headers["x-client-timezone-offset"] != "28800" {

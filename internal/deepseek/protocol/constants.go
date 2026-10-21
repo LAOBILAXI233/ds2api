@@ -45,10 +45,14 @@ const chromeMajorVersion = transport.ChromeMajorVersion
 
 var chromeUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/" + chromeMajorVersion + ".0.0.0 Safari/537.36"
 
-// chromeSecChUA 的 GREASE 品牌串和品牌顺序都随 Chrome 版本变化，
-// 这里的形式取自 chat.deepseek.com 网页版真实抓包（Chrome 150）。
-// 换版本时必须重新抓包核对，不能照着旧版本推。
-var chromeSecChUA = "\"Not;A=Brand\";v=\"8\", \"Chromium\";v=\"" + chromeMajorVersion + "\", \"Google Chrome\";v=\"" + chromeMajorVersion + "\""
+// chromeSecChUA 的品牌名、顺序与 GREASE 令牌都取自 2026-10 的真实抓包：
+//
+//	"Google Chrome";v="155", "Chromium";v="155", "Not(A:Brand";v="24"
+//
+// 不要自己推着拼：GREASE 品牌名（这里是 Not(A:Brand，旧版本叫 Not;A=Brand）和
+// 它带的版本（v="24"，不是主版本号）都随 Chrome 大版本变化，品牌顺序也不固定是
+// 「GREASE 在最前」。换版本时必须重新抓包核对。
+var chromeSecChUA = "\"Google Chrome\";v=\"" + chromeMajorVersion + "\", \"Chromium\";v=\"" + chromeMajorVersion + "\", \"Not(A:Brand\";v=\"24\""
 
 var defaultStaticBaseHeaders = map[string]string{
 	"Host":         "chat.deepseek.com",
@@ -268,27 +272,21 @@ func LoginHeaders(locale string) map[string]string {
 	if client.Locale == "" {
 		client.Locale = "zh_CN"
 	}
-	out := cloneStringMap(defaultStaticBaseHeaders)
-	for k, v := range sharedBaseHeaderOverrides {
-		if k == "" || v == "" {
-			continue
-		}
-		out[k] = v
-	}
-	out["x-client-timezone-offset"] = TimezoneOffsetFor(client.Locale)
-	if client.Name != "" && client.Version != "" {
-		out["User-Agent"] = client.Name + "/" + client.Version
-	}
-	if client.Platform != "" {
-		out["x-client-platform"] = client.Platform
-	}
-	if client.Version != "" {
-		out["x-client-version"] = client.Version
-	}
-	if client.Locale != "" {
-		out["x-client-locale"] = client.Locale
-	}
-	return out
+	// Sign-in carries the same browser header set as every other call.
+	//
+	// This used to send an App-style header set ("User-Agent: DeepSeek/<ver>", no
+	// sec-ch-ua, no Accept-Language, no sec-fetch-*) on the theory that the login
+	// endpoint tolerated it. A real capture of the web client's sign-up (2026-10
+	// HAR) shows the opposite: /users/register went out with the full Chrome
+	// header set — Chrome UA, sec-ch-ua, sec-fetch-*, Accept-Language, the lot.
+	//
+	// Worse, the old shape was self-contradictory on the one request that runs
+	// the device risk check: x-client-platform said "web", the TLS handshake was
+	// Chrome's, and the User-Agent said "DeepSeek/2.5.0" — an App that does not
+	// exist for this handshake. Delegating to BuildBaseHeaders keeps login and
+	// the rest of the traffic identical by construction, so they cannot drift
+	// apart again.
+	return BuildBaseHeaders(client, sharedBaseHeaderOverrides)
 }
 
 // sharedClient 和 sharedBaseHeaderOverrides 保存 init 时解析的原始值。

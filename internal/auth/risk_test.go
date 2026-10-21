@@ -184,6 +184,74 @@ func TestClientErrorStatusMapping(t *testing.T) {
 
 var _ = config.Account{}
 
+// The admin console polls RiskStatus to explain an empty pool: it must report an
+// open breaker with a remaining window, and go quiet again after a clear.
+func TestRiskStatusTracksTheBreaker(t *testing.T) {
+	h := newRefreshHarness(t, `{"accounts":[{"email":"a@example.com","password":"pwd"}]}`,
+		func(int32) (string, error) {
+			return "", NewLoginError(LoginCodeDevice, "RISK_DEVICE_DETECTED")
+		})
+
+	if got := h.resolver.RiskStatus(); got.Active {
+		t.Fatal("expected no active breaker before any refusal")
+	}
+	acc := h.account("a@example.com")
+	if err := h.resolver.RefreshAccountToken(context.Background(), acc, refreshReasonRequest); err == nil {
+		t.Fatal("expected the refusal to surface")
+	}
+
+	status := h.resolver.RiskStatus()
+	if !status.Active {
+		t.Fatal("expected the breaker to be reported as active")
+	}
+	if status.RemainingSeconds <= 0 {
+		t.Fatalf("expected a remaining window, got %d", status.RemainingSeconds)
+	}
+	if status.Strikes != 1 {
+		t.Fatalf("expected one strike, got %d", status.Strikes)
+	}
+	if status.Until.IsZero() {
+		t.Fatal("expected a deadline")
+	}
+
+	h.resolver.ClearRisk()
+	if got := h.resolver.RiskStatus(); got.Active {
+		t.Fatal("expected the operator override to close the breaker")
+	}
+}
+
+// A successful manual sign-in has to put the account back in rotation: clearing
+// the failure bookkeeping but leaving the local cooldown behind would make the
+// re-login look successful while the pool kept skipping the account.
+func TestClearRefreshBlockedAlsoDropsCooldown(t *testing.T) {
+	h := newRefreshHarness(t, `{"accounts":[{"email":"a@example.com","password":"pwd"}]}`,
+		func(int32) (string, error) {
+			return "", NewLoginError(LoginCodeDevice, "RISK_DEVICE_DETECTED")
+		})
+
+	acc := h.account("a@example.com")
+	if err := h.resolver.RefreshAccountToken(context.Background(), acc, refreshReasonRequest); err == nil {
+		t.Fatal("expected the refusal to surface")
+	}
+	if !h.account("a@example.com").IsCoolingDown() {
+		t.Fatal("expected the account to be parked")
+	}
+
+	if err := h.resolver.ClearRefreshBlocked("a@example.com"); err != nil {
+		t.Fatalf("clear failed: %v", err)
+	}
+	cleared := h.account("a@example.com")
+	if cleared.CooldownUntil != 0 {
+		t.Fatalf("expected the cooldown to be dropped, got %v", cleared.CooldownUntil)
+	}
+	if cleared.IsCoolingDown() {
+		t.Fatal("expected the account to be schedulable again")
+	}
+	if !cleared.IsSchedulable() {
+		t.Fatal("expected the account to be schedulable again")
+	}
+}
+
 // While the breaker is open a request does not even walk the pool: it gets the
 // cooldown answer immediately (rendered as 503 by the handlers).
 func TestDetermineFailsFastDuringRiskCooldown(t *testing.T) {

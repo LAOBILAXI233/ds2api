@@ -8,6 +8,7 @@ import AddKeyModal from './AddKeyModal'
 import AddAccountModal from './AddAccountModal'
 import EditAccountModal from './EditAccountModal'
 import ElasticPoolModal from './ElasticPoolModal'
+import ImportTokenModal from './ImportTokenModal'
 
 export default function AccountManagerContainer({ config, onRefresh, onMessage, authFetch }) {
     const { t } = useI18n()
@@ -15,6 +16,8 @@ export default function AccountManagerContainer({ config, onRefresh, onMessage, 
 
     const {
         queueStatus,
+        riskStatus,
+        fetchRiskStatus,
         keysExpanded,
         setKeysExpanded,
         accounts,
@@ -78,6 +81,20 @@ export default function AccountManagerContainer({ config, onRefresh, onMessage, 
         setElasticPool,
         savingElasticPool,
         saveElasticPool,
+        showImportToken,
+        openImportToken,
+        closeImportToken,
+        importTokenAccountId,
+        importTokenValue,
+        setImportTokenValue,
+        importingToken,
+        submitImportToken,
+        relogining,
+        reloginingAll,
+        reloginAccount,
+        reloginUnavailableAccounts,
+        clearingRisk,
+        clearRiskCooldown,
     } = useAccountActions({
         apiFetch,
         t,
@@ -86,6 +103,7 @@ export default function AccountManagerContainer({ config, onRefresh, onMessage, 
         config,
         fetchAccounts,
         resolveAccountIdentifier,
+        fetchRiskStatus,
     })
 
     return (
@@ -111,7 +129,13 @@ export default function AccountManagerContainer({ config, onRefresh, onMessage, 
                 </div>
             )}
 
-            <QueueCards queueStatus={queueStatus} t={t} />
+            <QueueCards
+                queueStatus={queueStatus}
+                riskStatus={riskStatus}
+                onClearRisk={clearRiskCooldown}
+                clearingRisk={clearingRisk}
+                t={t}
+            />
 
             <ApiKeysPanel
                 t={t}
@@ -137,6 +161,8 @@ export default function AccountManagerContainer({ config, onRefresh, onMessage, 
                 updatingProxy={updatingProxy}
                 togglingEnabled={togglingEnabled}
                 togglingAllEnabled={togglingAllEnabled}
+                relogining={relogining}
+                reloginingAll={reloginingAll}
                 totalAccounts={totalAccounts}
                 page={page}
                 pageSize={pageSize}
@@ -154,6 +180,9 @@ export default function AccountManagerContainer({ config, onRefresh, onMessage, 
                 onUpdateAccountProxy={updateAccountProxy}
                 onToggleAccountEnabled={toggleAccountEnabled}
                 onToggleAllAccountsEnabled={toggleAllAccountsEnabled}
+                onImportToken={openImportToken}
+                onReloginAccount={reloginAccount}
+                onReloginUnavailable={reloginUnavailableAccounts}
                 onPrevPage={() => fetchAccounts(page - 1)}
                 onNextPage={() => fetchAccounts(page + 1)}
                 onPageSizeChange={changePageSize}
@@ -202,6 +231,17 @@ export default function AccountManagerContainer({ config, onRefresh, onMessage, 
                 loading={savingElasticPool}
                 onClose={closeElasticPool}
                 onSave={saveElasticPool}
+            />
+
+            <ImportTokenModal
+                show={showImportToken}
+                t={t}
+                accountId={importTokenAccountId}
+                token={importTokenValue}
+                setToken={setImportTokenValue}
+                loading={importingToken}
+                onClose={closeImportToken}
+                onSubmit={submitImportToken}
             />
         </div>
     )

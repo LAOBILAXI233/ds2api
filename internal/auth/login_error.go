@@ -14,18 +14,38 @@ import (
 // other kind of failure (network, 5xx, a WAF hiccup, an unknown code) is worth
 // another attempt, and even that one is bounded.
 //
-// The business codes below are the ones ds-free-api treats as terminal:
+// The business codes below are the ones the web client itself enumerates
+// (captured from its own bundle: LOGIN_ERROR_CODE / LOGIN_BY_MOBILE_SMS_ERROR_CODE),
+// which is the authority on what a sign-in can answer:
 //
-//	2  credentials are wrong
+//	2  PASSWORD_OR_USER_NAME_IS_WRONG
 //	5  the account is muted / limited
-//	10 the account is banned
-//	11 the device check was refused (risk_device_detected)
+//	10 USER_IS_BANNED
+//	11 RISK_DEVICE_DETECTED   — the risk layer refused this device
+//	12 MOBILE_RESTRICTED      — this number/channel may not sign in here
+//	13 SIGNATURE_REQUIRED     — upstream wants a device signature (human step)
+//	14 OTP_REQUIRED           — upstream wants a verification code (human step)
+//
+// 13 and 14 are the codes that separate "wrong password" from "a person has to
+// verify this device". A gateway cannot answer either, so retrying is pointless —
+// but retiring the account would be wrong too: the account is fine, only the
+// device is unverified. They are parked instead, and the operator clears it by
+// signing in from a browser and importing that token.
 const (
-	LoginCodeCredentials = 2
-	LoginCodeMuted       = 5
-	LoginCodeBanned      = 10
-	LoginCodeDevice      = 11
+	LoginCodeCredentials      = 2
+	LoginCodeMuted            = 5
+	LoginCodeBanned           = 10
+	LoginCodeDevice           = 11
+	LoginCodeMobileRestricted = 12
+	LoginCodeSignature        = 13
+	LoginCodeOTP              = 14
 )
+
+// NeedsHumanVerification reports whether a refusal is the "a person must verify
+// this device" kind: answerable only by completing a challenge in a browser.
+func NeedsHumanVerification(code int) bool {
+	return code == LoginCodeSignature || code == LoginCodeOTP
+}
 
 // LoginError is a sign-in that upstream answered with a business code rather
 // than a transport failure.
@@ -57,7 +77,8 @@ func NewLoginError(code int, message string) *LoginError {
 // refusal rather than a transient one.
 func IsTerminalLoginCode(code int) bool {
 	switch code {
-	case LoginCodeCredentials, LoginCodeMuted, LoginCodeBanned, LoginCodeDevice:
+	case LoginCodeCredentials, LoginCodeMuted, LoginCodeBanned, LoginCodeDevice,
+		LoginCodeMobileRestricted, LoginCodeSignature, LoginCodeOTP:
 		return true
 	default:
 		return false

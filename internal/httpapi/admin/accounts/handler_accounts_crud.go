@@ -83,6 +83,9 @@ func (h *Handler) listAccounts(w http.ResponseWriter, r *http.Request) {
 			"banned":          acc.IsBanned(),
 			"muted":           acc.IsMuted(),
 			"muted_until":     acc.MutedUntil,
+			// CooldownUntil is the local, self-imposed park (a refused sign-in),
+			// as opposed to MutedUntil which upstream dictates.
+			"cooldown_until": acc.CooldownUntil,
 			// Token refresh bookkeeping: why an account was retired, and how
 			// old its token is.
 			"token_refreshed_at": acc.TokenRefreshedAt,

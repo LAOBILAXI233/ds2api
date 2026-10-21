@@ -361,6 +361,10 @@ func hifRequestHeaders(a *auth.RequestAuth, deviceID string) map[string]string {
 	headers["accept"] = "*/*"
 	headers["origin"] = "https://chat.deepseek.com"
 	headers["referer"] = "https://chat.deepseek.com/"
+	// hif-*.deepseek.com is a sibling origin, so the page's fetch reports
+	// `same-site`, not `same-origin`. BaseHeaders carries the chat.deepseek.com
+	// value, which would be a same-origin claim about a cross-site request.
+	headers["sec-fetch-site"] = "same-site"
 	if deviceID != "" {
 		headers["x-device-id"] = deviceID
 		headers["x-device-model"] = ""

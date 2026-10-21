@@ -120,6 +120,51 @@ func (r *Resolver) clearRiskCooldown() {
 	r.riskStrikes = 0
 }
 
+// RiskStatus is the sign-in breaker as the admin console has to show it: an
+// operator looking at "no accounts available" needs to know whether the pool is
+// empty or whether this deployment simply stopped signing in.
+type RiskStatus struct {
+	Active           bool
+	Until            time.Time
+	RemainingSeconds int
+	Strikes          int
+}
+
+// RiskStatus reports the breaker state. The zero value means sign-ins are
+// allowed.
+func (r *Resolver) RiskStatus() RiskStatus {
+	if r == nil {
+		return RiskStatus{}
+	}
+	r.riskMu.Lock()
+	defer r.riskMu.Unlock()
+	status := RiskStatus{Strikes: r.riskStrikes}
+	remaining := time.Until(r.riskUntil)
+	if !r.riskUntil.IsZero() && remaining > 0 {
+		status.Active = true
+		status.Until = r.riskUntil
+		status.RemainingSeconds = int((remaining + time.Second - 1) / time.Second)
+	}
+	return status
+}
+
+// ClearRisk lifts the breaker so the next caller retries a sign-in immediately.
+// This is the operator's override — useful right after pointing the accounts at
+// a different exit IP — and it deliberately does not reset the strike count:
+// one manual retry should not make the next refusal start from 10 minutes again.
+func (r *Resolver) ClearRisk() {
+	if r == nil {
+		return
+	}
+	r.riskMu.Lock()
+	wasActive := !r.riskUntil.IsZero()
+	r.riskUntil = time.Time{}
+	r.riskMu.Unlock()
+	if wasActive {
+		config.Logger.Info("[token_refresh] operator lifted the sign-in risk cooldown")
+	}
+}
+
 // ClientErrorStatus maps a Determine/refresh error to what the caller should see.
 //
 // A gateway that cannot sign in is an outage on this side, not a problem with

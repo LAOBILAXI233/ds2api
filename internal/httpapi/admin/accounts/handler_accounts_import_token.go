@@ -56,10 +56,28 @@ func (h *Handler) importAccountToken(w http.ResponseWriter, r *http.Request) {
 
 	name := strings.TrimSpace(adminshared.FieldString(req, "name"))
 	remark := strings.TrimSpace(adminshared.FieldString(req, "remark"))
+	// Upstream masks the address it reports back ("ryona******@example.com"), so
+	// a masked value is never stored as the account's email/mobile: it would
+	// become an identifier nobody can type, and it could never match the real
+	// account on a re-import. The stable plaintext identity is the user id.
 	email := strings.TrimSpace(user.Email)
 	mobile := config.NormalizeMobileForStorage(user.Mobile)
-	if email == "" && mobile == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "令牌对应的账号没有邮箱或手机号，无法作为账号标识"})
+	if config.IsMaskedIdentifier(email) {
+		email = ""
+	}
+	if config.IsMaskedIdentifier(mobile) {
+		mobile = ""
+	}
+	userID := strings.TrimSpace(user.ID)
+	// `identifier` lets the console say which existing account this token belongs
+	// to — the workflow that matters when password sign-in is refused: pick the
+	// dead account, paste a token, done. Without it there is nothing to match on
+	// (a masked email matches nothing) and the import would add a duplicate.
+	target := strings.TrimSpace(adminshared.FieldString(req, "identifier"))
+	if email == "" && mobile == "" && userID == "" && target == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"detail": "令牌对应的账号没有可用的邮箱、手机号或账号 id，无法作为账号标识",
+		})
 		return
 	}
 
@@ -67,47 +85,56 @@ func (h *Handler) importAccountToken(w http.ResponseWriter, r *http.Request) {
 	updated := false
 	err = h.Store.Update(func(c *config.Config) error {
 		for i := range c.Accounts {
-			matches := (email != "" && strings.EqualFold(strings.TrimSpace(c.Accounts[i].Email), email)) ||
-				(mobile != "" && config.CanonicalMobileKey(c.Accounts[i].Mobile) == config.CanonicalMobileKey(mobile))
+			acc := &c.Accounts[i]
+			matches := (target != "" && acc.Identifier() == target) ||
+				(userID != "" && strings.TrimSpace(acc.UserID) == userID) ||
+				(email != "" && strings.EqualFold(strings.TrimSpace(acc.Email), email)) ||
+				(mobile != "" && config.CanonicalMobileKey(acc.Mobile) == config.CanonicalMobileKey(mobile))
 			if !matches {
 				continue
 			}
-			if c.Accounts[i].Email == "" && email != "" {
-				c.Accounts[i].Email = email
+			if acc.UserID == "" && userID != "" {
+				acc.UserID = userID
 			}
-			if c.Accounts[i].Mobile == "" && mobile != "" {
-				c.Accounts[i].Mobile = mobile
+			if acc.Email == "" && email != "" {
+				acc.Email = email
 			}
-			c.Accounts[i].Token = token
+			if acc.Mobile == "" && mobile != "" {
+				acc.Mobile = mobile
+			}
+			acc.Token = token
 			// The token was just validated against /users/current, so its age is
 			// known: record it, or the sweeper would treat it as unaged.
-			c.Accounts[i].TokenRefreshedAt = float64(time.Now().Unix())
-			c.Accounts[i].RefreshFailures = 0
-			c.Accounts[i].RefreshError = ""
-			c.Accounts[i].RefreshRetryAt = 0
-			// A fresh, live token clears the suspended marker a previous
-			// USER_IS_BANNED left behind.
-			if c.Accounts[i].Banned {
-				c.Accounts[i].Banned = false
-				c.Accounts[i].Disabled = false
-				c.Accounts[i].DisabledReason = ""
-			}
+			acc.TokenRefreshedAt = float64(time.Now().Unix())
+			acc.RefreshFailures = 0
+			acc.RefreshError = ""
+			acc.RefreshRetryAt = 0
+			// A live token clears every "this account cannot be used" marker a
+			// refused password sign-in left behind — including the local
+			// cooldown, which otherwise keeps the pool skipping the account even
+			// though its token is fine.
+			acc.CooldownUntil = 0
+			acc.Banned = false
+			acc.Disabled = false
+			acc.DisabledReason = ""
 			if name != "" {
-				c.Accounts[i].Name = name
+				acc.Name = name
 			}
 			if remark != "" {
-				c.Accounts[i].Remark = remark
+				acc.Remark = remark
 			}
 			updated = true
 			return nil
 		}
 		c.Accounts = append(c.Accounts, config.Account{
-			Name:   name,
-			Remark: remark,
-			Email:  email,
-			Mobile: mobile,
-			Token:  token,
-			Locale: locale,
+			Name:             name,
+			Remark:           remark,
+			UserID:           userID,
+			Email:            email,
+			Mobile:           mobile,
+			Token:            token,
+			TokenRefreshedAt: float64(time.Now().Unix()),
+			Locale:           locale,
 		})
 		created = true
 		return nil
@@ -120,19 +147,26 @@ func (h *Handler) importAccountToken(w http.ResponseWriter, r *http.Request) {
 	if h.Pool != nil {
 		h.Pool.Reset()
 	}
+	// Report the identifier the account actually ends up with, not the one we
+	// derived: a masked-email import becomes `user:<id>`, and the console has to
+	// show something the operator can then use in other admin calls.
 	identifier := email
 	if identifier == "" {
 		identifier = mobile
 	}
+	if identifier == "" && userID != "" {
+		identifier = "user:" + userID
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":         true,
-		"identifier": identifier,
-		"email":      email,
-		"mobile":     mobile,
-		"created":    created,
-		"updated":    updated,
-		"user_id":    user.ID,
-		"muted":      user.IsMuted,
-		"mute_until": user.MuteUntil,
+		"ok":              true,
+		"identifier":      identifier,
+		"email":           email,
+		"mobile":          mobile,
+		"created":         created,
+		"updated":         updated,
+		"user_id":         userID,
+		"masked_identity": config.IsMaskedIdentifier(user.Email) || config.IsMaskedIdentifier(user.Mobile),
+		"muted":           user.IsMuted,
+		"mute_until":      user.MuteUntil,
 	})
 }

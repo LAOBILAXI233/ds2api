@@ -117,3 +117,62 @@ func TestImportAccountTokenRejectsRefusedToken(t *testing.T) {
 		t.Fatalf("expected a detail message, got %#v", payload)
 	}
 }
+
+// Upstream masks the address it reports ("ryona******@example.com"), which is
+// what a live /users/current returns. Storing that as the email would create an
+// identifier nobody can type and that could never match the real account again,
+// so the account id becomes the identity instead.
+func TestImportAccountTokenUsesUserIDForMaskedEmail(t *testing.T) {
+	mock := &tokenImportDSMock{user: &dsclient.CurrentUser{ID: "u-9", Email: "ryona******@example.com", Token: "t"}}
+	router := newHTTPAdminHarness(t, `{"accounts":[]}`, mock)
+
+	body, _ := json.Marshal(map[string]any{"token": "t"})
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, adminReq(http.MethodPost, "/accounts/import-token", body))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &payload)
+	if payload["identifier"] != "user:u-9" {
+		t.Fatalf("expected the user id to become the identifier, got %#v", payload["identifier"])
+	}
+	if payload["email"] != "" {
+		t.Fatalf("a masked address must not be stored as the email, got %#v", payload["email"])
+	}
+	if masked, _ := payload["masked_identity"].(bool); !masked {
+		t.Fatal("expected the response to flag the masked identity")
+	}
+
+	// Re-importing the same token must update that account, not add a second one.
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, adminReq(http.MethodPost, "/accounts/import-token", body))
+	var second map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &second)
+	if updated, _ := second["updated"].(bool); !updated {
+		t.Fatalf("expected the re-import to update the same account, got %#v", second)
+	}
+}
+
+// The console knows which account the operator opened, and that is the only
+// reliable way to re-token a password account whose reported email is masked.
+func TestImportAccountTokenTargetsNamedAccount(t *testing.T) {
+	raw := `{"accounts":[{"email":"dead@example.com","password":"pwd","disabled":true,"disabled_reason":"设备校验未通过","cooldown_until":9999999999}]}`
+	mock := &tokenImportDSMock{user: &dsclient.CurrentUser{ID: "u-3", Email: "ryona******@example.com", Token: "t"}}
+	router := newHTTPAdminHarness(t, raw, mock)
+
+	body, _ := json.Marshal(map[string]any{"token": "t", "identifier": "dead@example.com"})
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, adminReq(http.MethodPost, "/accounts/import-token", body))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &payload)
+	if updated, _ := payload["updated"].(bool); !updated {
+		t.Fatalf("expected the named account to be updated, got %#v", payload)
+	}
+	if created, _ := payload["created"].(bool); created {
+		t.Fatal("targeting an existing account must not create a duplicate")
+	}
+}

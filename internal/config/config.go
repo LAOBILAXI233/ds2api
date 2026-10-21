@@ -31,7 +31,11 @@ type Config struct {
 }
 
 type Account struct {
-	Name           string  `json:"name,omitempty"`
+	Name string `json:"name,omitempty"`
+	// UserID 是上游的账号 id（/users/current 的 biz_data.id）。
+	// 只有导入令牌的账号需要它：上游把邮箱/手机号打码后才返回
+	// （如 ryona******@…），打码值不能当账号标识，重复导入也无法据此匹配。
+	UserID         string  `json:"user_id,omitempty"`
 	Remark         string  `json:"remark,omitempty"`
 	Email          string  `json:"email,omitempty"`
 	Mobile         string  `json:"mobile,omitempty"`
@@ -100,11 +104,28 @@ func StableProxyID(p Proxy) string {
 	return "proxy_" + hex.EncodeToString(sum[:6])
 }
 
+// ClearAccountTokens drops the session tokens this process obtained by signing in
+// before a config is written to disk: they are short-lived, and a live session
+// credential does not belong in config.json when the password that produced it
+// is already there.
+//
+// An account with NO password is the exception, and it is the reason this is not
+// a blanket wipe. Such an account exists only because its token was pasted in
+// (see POST /admin/accounts/import-token) — usually because the sign-in endpoint
+// refuses this deployment — so its token is the one and only credential it has.
+// Clearing it would not protect anything: it would silently delete the account
+// on the next restart, which is exactly when it cannot be re-created.
+//
+// Operators whose deployment cannot sign in at all opt out of the whole rule with
+// runtime.persist_tokens (see RuntimeConfig.PersistTokens).
 func (c *Config) ClearAccountTokens() {
-	if c == nil {
+	if c == nil || c.TokensPersist() {
 		return
 	}
 	for i := range c.Accounts {
+		if strings.TrimSpace(c.Accounts[i].Password) == "" && strings.TrimSpace(c.Accounts[i].Token) != "" {
+			continue
+		}
 		c.Accounts[i].Token = ""
 	}
 }
@@ -190,6 +211,17 @@ type RuntimeConfig struct {
 	// WarmUpOnStartup 控制启动时是否预热各账号（登录/续期 + 令牌 + 风控令牌），
 	// nil = 默认开启。关闭后账号在首个请求到来时才登录。
 	WarmUpOnStartup *bool `json:"warm_up_on_startup,omitempty"`
+	// PersistTokens 控制是否把会话令牌写进 config.json（默认关闭）。
+	// 默认行为：登录换来的令牌只留在内存里，进程退出即失效——密码还在，重启后
+	// 重新登录即可。开启后令牌会落盘，重启不必再登录；代价是 config.json 里会
+	// 出现可用的会话凭证，需要自己保证文件权限。
+	// 只在登录接口对本机被风控拒绝（RISK_DEVICE_DETECTED）时才值得打开。
+	PersistTokens *bool `json:"persist_tokens,omitempty"`
+}
+
+// TokensPersist reports whether session tokens are written to config.json.
+func (c *Config) TokensPersist() bool {
+	return c != nil && c.Runtime.PersistTokens != nil && *c.Runtime.PersistTokens
 }
 
 type ResponsesConfig struct {

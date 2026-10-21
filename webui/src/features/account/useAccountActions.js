@@ -1,6 +1,6 @@
 import { useState } from 'react'
 
-export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, fetchAccounts, resolveAccountIdentifier }) {
+export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, fetchAccounts, resolveAccountIdentifier, fetchRiskStatus }) {
     const [showAddKey, setShowAddKey] = useState(false)
     const [editingKey, setEditingKey] = useState(null)
     const [showAddAccount, setShowAddAccount] = useState(false)
@@ -22,6 +22,13 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, f
     const [showElasticPool, setShowElasticPool] = useState(false)
     const [elasticPool, setElasticPool] = useState({ enabled: false, per_pool: false, global_count: 3, default_count: 3, no_tools_count: 3, tools_only_count: 3 })
     const [savingElasticPool, setSavingElasticPool] = useState(false)
+    const [showImportToken, setShowImportToken] = useState(false)
+    const [importTokenAccountId, setImportTokenAccountId] = useState('')
+    const [importTokenValue, setImportTokenValue] = useState('')
+    const [importingToken, setImportingToken] = useState(false)
+    const [relogining, setRelogining] = useState({})
+    const [reloginingAll, setReloginingAll] = useState(false)
+    const [clearingRisk, setClearingRisk] = useState(false)
 
     const openAddKey = () => {
         setEditingKey(null)
@@ -413,6 +420,150 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, f
         }
     }
 
+    // ---- Session token import -------------------------------------------------
+    // The password sign-in path is the one upstream guards with its risk layer
+    // (RISK_DEVICE_DETECTED). Pasting a token from an already signed-in browser
+    // skips that call entirely, which is what makes an account usable again
+    // while sign-ins are being refused.
+
+    const openImportToken = (account) => {
+        setImportTokenAccountId(resolveAccountIdentifier(account) || '')
+        setImportTokenValue('')
+        setShowImportToken(true)
+    }
+
+    const closeImportToken = () => {
+        setShowImportToken(false)
+        setImportTokenAccountId('')
+        setImportTokenValue('')
+    }
+
+    const submitImportToken = async () => {
+        const token = String(importTokenValue || '').trim()
+        if (!token) return
+        setImportingToken(true)
+        try {
+            // Send the account the operator opened the dialog for: upstream masks
+            // the address it reports back, so the target is the only reliable way
+            // to tell "re-token this account" from "add a new one".
+            const payload = { token }
+            if (importTokenAccountId) payload.identifier = importTokenAccountId
+            const res = await apiFetch('/admin/accounts/import-token', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            })
+            const data = await res.json().catch(() => ({}))
+            if (!res.ok) {
+                onMessage('error', data.detail || t('messages.requestFailed'))
+                return
+            }
+            onMessage('success', t('accountManager.importTokenSuccess', { identifier: data.identifier || importTokenAccountId }))
+            closeImportToken()
+            fetchAccounts()
+            onRefresh()
+        } catch (_err) {
+            onMessage('error', t('messages.networkError'))
+        } finally {
+            setImportingToken(false)
+        }
+    }
+
+    // ---- Manual re-login -----------------------------------------------------
+
+    // Lift the sign-in breaker so the next attempt actually reaches upstream.
+    // Worth doing right after the accounts were pointed at a different exit IP.
+    const clearRiskCooldown = async () => {
+        setClearingRisk(true)
+        try {
+            const res = await apiFetch('/admin/signin-risk/clear', { method: 'POST' })
+            const data = await res.json().catch(() => ({}))
+            if (!res.ok) {
+                onMessage('error', data.detail || t('messages.requestFailed'))
+                return
+            }
+            onMessage('success', t('accountManager.riskCooldownCleared'))
+            fetchRiskStatus?.()
+        } catch (_err) {
+            onMessage('error', t('messages.networkError'))
+        } finally {
+            setClearingRisk(false)
+        }
+    }
+
+    const reloginAccount = async (identifier, options = {}) => {
+        const silent = Boolean(options.silent)
+        const accountID = String(identifier || '').trim()
+        if (!accountID) {
+            if (!silent) onMessage('error', t('accountManager.invalidIdentifier'))
+            return false
+        }
+        setRelogining(prev => ({ ...prev, [accountID]: true }))
+        try {
+            const res = await apiFetch(`/admin/accounts/${encodeURIComponent(accountID)}/relogin`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ clear: true }),
+            })
+            const data = await res.json().catch(() => ({}))
+            if (!res.ok) {
+                if (!silent) {
+                    onMessage('error', data.risk_cooldown
+                        ? t('accountManager.reloginRiskCooldown')
+                        : (data.detail || t('messages.requestFailed')))
+                }
+                return false
+            }
+            if (!silent) onMessage('success', t('accountManager.reloginSuccess', { identifier: accountID }))
+            return true
+        } catch (_err) {
+            if (!silent) onMessage('error', t('messages.networkError'))
+            return false
+        } finally {
+            setRelogining(prev => ({ ...prev, [accountID]: false }))
+        }
+    }
+
+    // Re-sign-in every account that currently has no usable session, one at a
+    // time, and STOP at the first refusal: hammering the sign-in endpoint is what
+    // turns a single refusal into a persistent risk block.
+    const reloginUnavailableAccounts = async () => {
+        const all = config.accounts || []
+        const targets = all.filter(acc => {
+            const id = resolveAccountIdentifier(acc)
+            if (!id || acc.enabled === false || acc.banned === true || acc.muted === true) return false
+            return Boolean(acc.refresh_error) || !acc.has_token
+        })
+        if (targets.length === 0) {
+            onMessage('success', t('accountManager.reloginNoneNeeded'))
+            return
+        }
+        if (!confirm(t('accountManager.reloginAllConfirm', { count: targets.length }))) return
+        setReloginingAll(true)
+        let success = 0
+        let stopped = false
+        try {
+            for (const acc of targets) {
+                const id = resolveAccountIdentifier(acc)
+                if (await reloginAccount(id, { silent: true })) {
+                    success++
+                    continue
+                }
+                stopped = true
+                break
+            }
+        } finally {
+            setReloginingAll(false)
+            fetchAccounts()
+            onRefresh()
+        }
+        if (stopped) {
+            onMessage('error', t('accountManager.reloginAllStopped', { success, total: targets.length }))
+            return
+        }
+        onMessage('success', t('accountManager.reloginAllCompleted', { success, total: targets.length }))
+    }
+
     const openElasticPool = () => {
         const ep = config?.elastic_pool || {}
         setElasticPool({
@@ -536,5 +687,19 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, f
         setElasticPool,
         savingElasticPool,
         saveElasticPool,
+        showImportToken,
+        openImportToken,
+        closeImportToken,
+        importTokenAccountId,
+        importTokenValue,
+        setImportTokenValue,
+        importingToken,
+        submitImportToken,
+        relogining,
+        reloginingAll,
+        reloginAccount,
+        reloginUnavailableAccounts,
+        clearingRisk,
+        clearRiskCooldown,
     }
 }

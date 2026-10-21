@@ -91,8 +91,10 @@
     "token_refresh_interval_hours": 6,
     "_comment_hif": "是否在 completion/continue/resume 请求上回传网页端风控令牌 x-hif-leim / x-hif-dliq（按账号设备各自缓存，默认开启；DS2API_HIF_TOKENS=0 可关闭做对照）",
     "hif_tokens": true,
-    "_comment_warm_up": "启动时是否后台预热账号：登录/续期 → 校验令牌 → 设备校验 → 预取风控令牌（默认开启）",
-    "warm_up_on_startup": true
+    "_comment_warm_up": "启动时是否后台预热账号：登录/续期 → 校验令牌 → 设备校验 → 预取风控令牌（默认开启；只预热已有令牌的账号，冷账号等第一个请求再登录）",
+    "warm_up_on_startup": true,
+    "_comment_persist_tokens": "是否把会话令牌写入 config.json（默认关闭）。关闭时令牌只在内存，重启后重新登录；登录接口被风控拒绝（RISK_DEVICE_DETECTED）时才需要打开，代价是文件里会留下可用的会话凭证。注意：没有密码、只靠导入令牌存在的账号，其令牌始终保留，否则重启即丢失",
+    "persist_tokens": false
   },
   "auto_delete": {
     "mode": "none"

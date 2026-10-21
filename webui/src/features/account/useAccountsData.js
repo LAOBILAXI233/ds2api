@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 
 export function useAccountsData({ apiFetch }) {
     const [queueStatus, setQueueStatus] = useState(null)
+    const [riskStatus, setRiskStatus] = useState(null)
     const [keysExpanded, setKeysExpanded] = useState(false)
 
     const [accounts, setAccounts] = useState([])
@@ -60,15 +61,35 @@ export function useAccountsData({ apiFetch }) {
         }
     }
 
+    // The sign-in breaker is what explains an empty pool, so it is polled with
+    // the queue status rather than on its own timer.
+    const fetchRiskStatus = async () => {
+        try {
+            const res = await apiFetch('/admin/signin-risk')
+            if (res.ok) {
+                const data = await res.json()
+                setRiskStatus(data?.supported === false ? null : data)
+            }
+        } catch (e) {
+            console.error('Failed to fetch sign-in risk status:', e)
+        }
+    }
+
     useEffect(() => {
         fetchAccounts()
         fetchQueueStatus()
-        const interval = setInterval(fetchQueueStatus, 5000)
+        fetchRiskStatus()
+        const interval = setInterval(() => {
+            fetchQueueStatus()
+            fetchRiskStatus()
+        }, 5000)
         return () => clearInterval(interval)
     }, [])
 
     return {
         queueStatus,
+        riskStatus,
+        fetchRiskStatus,
         keysExpanded,
         setKeysExpanded,
         accounts,

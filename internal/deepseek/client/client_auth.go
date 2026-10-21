@@ -679,6 +679,16 @@ func classifyLoginRefusal(code int, message string) *auth.LoginError {
 		return auth.NewLoginError(auth.LoginCodeMuted, message)
 	case code == auth.LoginCodeCredentials || strings.Contains(text, "password") || strings.Contains(text, "密码"):
 		return auth.NewLoginError(auth.LoginCodeCredentials, message)
+	// The three newer codes must be checked by number before any substring rule:
+	// "risk"/"device" appear in none of them, but a future message wording would
+	// otherwise be swallowed by the device branch below and turned into a
+	// breaker-tripping "risky device" verdict.
+	case code == auth.LoginCodeMobileRestricted || strings.Contains(text, "mobile_restricted"):
+		return auth.NewLoginError(auth.LoginCodeMobileRestricted, message)
+	case code == auth.LoginCodeSignature || strings.Contains(text, "signature_required"):
+		return auth.NewLoginError(auth.LoginCodeSignature, message)
+	case code == auth.LoginCodeOTP || strings.Contains(text, "otp_required"):
+		return auth.NewLoginError(auth.LoginCodeOTP, message)
 	case code == auth.LoginCodeDevice || strings.Contains(text, "risk_device") || strings.Contains(text, "device") || strings.Contains(text, "设备"):
 		return auth.NewLoginError(auth.LoginCodeDevice, message)
 	}

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { ChevronLeft, ChevronRight, Check, Copy, Pencil, Play, Plus, Trash2, FolderX } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Check, Copy, Pencil, Play, Plus, Trash2, FolderX, KeyRound, RefreshCw } from 'lucide-react'
 import clsx from 'clsx'
 
 export default function AccountsTable({
@@ -14,6 +14,8 @@ export default function AccountsTable({
     updatingProxy,
     togglingEnabled,
     togglingAllEnabled,
+    relogining,
+    reloginingAll,
     totalAccounts,
     page,
     pageSize,
@@ -31,6 +33,9 @@ export default function AccountsTable({
     onUpdateAccountProxy,
     onToggleAccountEnabled,
     onToggleAllAccountsEnabled,
+    onImportToken,
+    onReloginAccount,
+    onReloginUnavailable,
     onPrevPage,
     onNextPage,
     onPageSizeChange,
@@ -70,6 +75,14 @@ export default function AccountsTable({
                         {t('accountManager.testAll')}
                     </button>
                     <button
+                        onClick={() => onImportToken()}
+                        className="flex items-center gap-2 px-3 py-2 rounded-lg transition-colors font-medium text-sm border border-border bg-secondary text-secondary-foreground hover:bg-secondary/80"
+                        title={t('accountManager.importTokenHint')}
+                    >
+                        <KeyRound className="w-4 h-4" />
+                        {t('accountManager.importTokenButton')}
+                    </button>
+                    <button
                         onClick={onShowAddAccount}
                         className="flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 transition-colors font-medium text-sm shadow-sm"
                     >
@@ -87,6 +100,15 @@ export default function AccountsTable({
                     {t('accountManager.elasticPool')}
                 </button>
                 <div className="flex flex-wrap gap-2">
+                    <button
+                        onClick={onReloginUnavailable}
+                        disabled={reloginingAll || testingAll || totalAccounts === 0}
+                        className="flex items-center px-3 py-1.5 bg-secondary text-secondary-foreground rounded-lg hover:bg-secondary/80 transition-colors text-xs font-medium border border-border disabled:opacity-50"
+                        title={t('accountManager.reloginUnavailableHint')}
+                    >
+                        {reloginingAll ? <span className="animate-spin mr-2">⟳</span> : <RefreshCw className="w-3 h-3 mr-2" />}
+                        {t('accountManager.reloginUnavailable')}
+                    </button>
                     <button
                         onClick={() => onToggleAllAccountsEnabled(false)}
                         disabled={elasticPoolEnabled || togglingAllEnabled || testingAll || totalAccounts === 0}
@@ -144,7 +166,12 @@ export default function AccountsTable({
                         const isBanned = acc.banned === true
                         const isMuted = acc.muted === true
                         const mutedRecoverAt = formatMuteUntil(acc.muted_until)
-                        const isActive = !isDisabled && !isBanned && !isMuted && (acc.test_status === 'ok' || acc.has_token)
+                        const isCoolingDown = isCooling(acc.cooldown_until)
+                        const cooldownRecoverAt = formatMuteUntil(acc.cooldown_until)
+                        const refreshError = String(acc.refresh_error || '').trim()
+                        const refreshFailures = Number(acc.refresh_failures || 0)
+                        const isActive = !isDisabled && !isBanned && !isMuted && !isCoolingDown && !refreshError && (acc.test_status === 'ok' || acc.has_token)
+                        const isRelogining = Boolean(relogining?.[id])
                         return (
                             <div key={i} className={clsx(
                                 "p-4 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-muted/50 transition-colors",
@@ -156,6 +183,8 @@ export default function AccountsTable({
                                         isDisabled ? "bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.5)]" :
                                         isBanned ? "bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.5)]" :
                                         isMuted ? "bg-orange-500 shadow-[0_0_8px_rgba(249,115,22,0.5)]" :
+                                        isCoolingDown ? "bg-amber-500 shadow-[0_0_8px_rgba(245,158,11,0.5)]" :
+                                        refreshError ? "bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.5)]" :
                                         acc.test_status === 'failed' ? "bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.5)]" :
                                         isActive ? "bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]" :
                                         runtimeUnknown ? "bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.5)]" : "bg-amber-500"
@@ -176,7 +205,7 @@ export default function AccountsTable({
                                             <div className="text-xs text-muted-foreground truncate mt-0.5">{acc.remark}</div>
                                         )}
                                         <div className="flex items-center gap-2 text-xs text-muted-foreground mt-0.5">
-                                            <span>{isBanned ? (acc.disabled_reason || t('accountManager.accountBanned')) : isDisabled ? t('accountManager.accountDisabled') : isMuted ? t('accountManager.accountMuted') : acc.test_status === 'failed' ? t('accountManager.testStatusFailed') : isActive ? t('accountManager.sessionActive') : runtimeUnknown ? t('accountManager.runtimeStatusUnknown') : t('accountManager.reauthRequired')}</span>
+                                            <span>{isBanned ? (acc.disabled_reason || t('accountManager.accountBanned')) : isDisabled ? t('accountManager.accountDisabled') : isMuted ? t('accountManager.accountMuted') : isCoolingDown ? t('accountManager.accountCoolingDown') : refreshError ? t('accountManager.refreshFailed') : acc.test_status === 'failed' ? t('accountManager.testStatusFailed') : isActive ? t('accountManager.sessionActive') : runtimeUnknown ? t('accountManager.runtimeStatusUnknown') : t('accountManager.reauthRequired')}</span>
                                             {isDisabled && !isBanned && (
                                                 <span className="font-mono bg-red-500/10 text-red-500 px-1.5 py-0.5 rounded text-[10px]" title={t('accountManager.accountDisabledHint')}>
                                                     {t('accountManager.accountDisabled')}
@@ -190,6 +219,19 @@ export default function AccountsTable({
                                             {isMuted && (
                                                 <span className="font-mono bg-orange-500/10 text-orange-500 px-1.5 py-0.5 rounded text-[10px]" title={t('accountManager.accountMutedHint')}>
                                                     {t('accountManager.accountMutedRecoverAt', { time: mutedRecoverAt })}
+                                                </span>
+                                            )}
+                                            {isCoolingDown && (
+                                                <span className="font-mono bg-amber-500/10 text-amber-600 dark:text-amber-400 px-1.5 py-0.5 rounded text-[10px]" title={refreshError || t('accountManager.accountCoolingDownHint')}>
+                                                    {t('accountManager.accountCoolingDownRecoverAt', { time: cooldownRecoverAt })}
+                                                </span>
+                                            )}
+                                            {refreshError && !isCoolingDown && (
+                                                <span
+                                                    className="font-mono bg-red-500/10 text-red-500 px-1.5 py-0.5 rounded text-[10px] max-w-[260px] truncate"
+                                                    title={`${refreshError}${refreshFailures > 0 ? ` (${t('accountManager.refreshFailures', { count: refreshFailures })})` : ''}`}
+                                                >
+                                                    {t('accountManager.refreshFailed')}{refreshFailures > 0 ? ` ×${refreshFailures}` : ''}
                                                 </span>
                                             )}
                                             {acc.token_preview && (
@@ -265,6 +307,24 @@ export default function AccountsTable({
                                             </option>
                                         ))}
                                     </select>
+                                    <button
+                                        onClick={() => onImportToken(acc)}
+                                        disabled={!id}
+                                        className="p-1 lg:p-1.5 text-muted-foreground hover:text-emerald-500 hover:bg-emerald-500/10 rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                                        title={id ? t('accountManager.importTokenTitle') : t('accountManager.invalidIdentifier')}
+                                    >
+                                        <KeyRound className="w-3.5 h-3.5 lg:w-4 lg:h-4" />
+                                    </button>
+                                    <button
+                                        onClick={() => onReloginAccount(id)}
+                                        disabled={!id || isRelogining}
+                                        className="p-1 lg:p-1.5 text-muted-foreground hover:text-primary hover:bg-primary/10 rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                                        title={id ? t('accountManager.reloginTitle') : t('accountManager.invalidIdentifier')}
+                                    >
+                                        {isRelogining
+                                            ? <span className="block w-3.5 h-3.5 lg:w-4 lg:h-4 animate-spin text-center leading-none">⟳</span>
+                                            : <RefreshCw className="w-3.5 h-3.5 lg:w-4 lg:h-4" />}
+                                    </button>
                                     <button
                                         onClick={() => onEditAccount(acc)}
                                         disabled={!id}
@@ -342,4 +402,11 @@ function formatMuteUntil(muteUntil) {
     const hour = String(d.getHours()).padStart(2, '0')
     const min = String(d.getMinutes()).padStart(2, '0')
     return `${day}/${month} ${hour}:${min}`
+}
+
+// isCooling reports whether an account is inside the local cooldown a refused
+// sign-in set. `cooldown_until` is Unix seconds, like muted_until.
+function isCooling(cooldownUntil) {
+    if (!cooldownUntil || cooldownUntil <= 0) return false
+    return cooldownUntil * 1000 > Date.now()
 }

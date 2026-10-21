@@ -61,6 +61,9 @@ func (h *Handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 			if runtimeCfg.WarmUpOnStartup != nil {
 				c.Runtime.WarmUpOnStartup = runtimeCfg.WarmUpOnStartup
 			}
+			if runtimeCfg.PersistTokens != nil {
+				c.Runtime.PersistTokens = runtimeCfg.PersistTokens
+			}
 		}
 		if responsesCfg != nil && responsesCfg.StoreTTLSeconds > 0 {
 			c.Responses.StoreTTLSeconds = responsesCfg.StoreTTLSeconds

@@ -34,11 +34,7 @@ type fileFetcher interface {
 func (h *Handler) UploadFile(w http.ResponseWriter, r *http.Request) {
 	a, err := h.Auth.Determine(r)
 	if err != nil {
-		status := http.StatusUnauthorized
-		detail := err.Error()
-		if err == auth.ErrNoAccount {
-			status = http.StatusTooManyRequests
-		}
+		status, detail := auth.ClientErrorStatus(err)
 		shared.WriteOpenAIError(w, status, detail)
 		return
 	}
@@ -103,11 +99,7 @@ func (h *Handler) UploadFile(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) RetrieveFile(w http.ResponseWriter, r *http.Request) {
 	a, err := h.Auth.Determine(r)
 	if err != nil {
-		status := http.StatusUnauthorized
-		detail := err.Error()
-		if err == auth.ErrNoAccount {
-			status = http.StatusTooManyRequests
-		}
+		status, detail := auth.ClientErrorStatus(err)
 		shared.WriteOpenAIError(w, status, detail)
 		return
 	}

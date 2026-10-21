@@ -3,12 +3,15 @@ package claude
 import (
 	"encoding/json"
 	"net/http"
+
+	"ds2api/internal/auth"
 )
 
 func (h *Handler) CountTokens(w http.ResponseWriter, r *http.Request) {
 	a, err := h.Auth.Determine(r)
 	if err != nil {
-		writeClaudeError(w, http.StatusUnauthorized, err.Error())
+		status, detail := auth.ClientErrorStatus(err)
+		writeClaudeError(w, status, detail)
 		return
 	}
 	defer h.Auth.Release(a)

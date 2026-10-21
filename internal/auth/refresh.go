@@ -124,6 +124,12 @@ func (r *Resolver) refreshAccountToken(ctx context.Context, a *RequestAuth, reas
 	gate.mu.Lock()
 	defer gate.mu.Unlock()
 
+	// While the breaker is open nothing is attempted: retrying a refusal is
+	// what deepens it.
+	if remaining := r.riskCooldownRemaining(); remaining > 0 {
+		return &RiskCooldownError{Until: time.Now().Add(remaining), Cause: errRiskCause}
+	}
+
 	// Another goroutine may have refreshed while this one waited. Re-read the
 	// account and use what the store now holds.
 	if fresh, ok := r.Store.FindAccount(a.AccountID); ok {
@@ -152,8 +158,14 @@ func (r *Resolver) refreshAccountToken(ctx context.Context, a *RequestAuth, reas
 
 	if err := r.loginAndPersist(ctx, a); err != nil {
 		r.recordRefreshFailure(a, err)
+		// A device refusal leaves the breaker open: report it as such so the
+		// caller (and the client) sees "backing off", not "your key is wrong".
+		if loginErr, ok := AsLoginError(err); ok && loginErr.Code == LoginCodeDevice {
+			return &RiskCooldownError{Until: time.Now().Add(r.riskCooldownRemaining()), Cause: err}
+		}
 		return err
 	}
+	r.clearRiskCooldown()
 	return nil
 }
 
@@ -175,6 +187,23 @@ func (r *Resolver) recordRefreshFailure(a *RequestAuth, err error) {
 	}
 	if loginErr, ok := AsLoginError(err); ok && loginErr.Terminal {
 		reason := loginDisableReason(loginErr)
+		switch loginErr.Code {
+		case LoginCodeDevice:
+			// Device/risk refusals are judged per account+device+IP: usually the
+			// proxy's own exit IP is flagged, which every account then hits at
+			// once. Retiring 31 accounts over that would be destructive and
+			// wrong, so the account is parked and a global breaker opens.
+			until := r.enterRiskCooldown()
+			r.applyAccountCooldown(identifier, until, reason)
+			return
+		case LoginCodeMuted:
+			// A mute is a rest, not a retirement: park it and let it come back.
+			until := time.Now().Add(30 * time.Minute)
+			config.Logger.Warn("[token_refresh] sign-in refused as muted, parking the account",
+				"account", identifier, "until", until.UTC().Format(time.RFC3339))
+			r.applyAccountCooldown(identifier, until, reason)
+			return
+		}
 		config.Logger.Warn("[token_refresh] account refused at sign-in, disabling it",
 			"account", identifier, "code", loginErr.Code, "reason", reason)
 		r.disableAccountForRefresh(identifier, reason, loginErr.Code == LoginCodeBanned)
@@ -367,7 +396,14 @@ func (r *Resolver) sweepTokens(ctx context.Context) {
 		if !acc.IsEnabled() || acc.IsBanned() || acc.Identifier() == "" {
 			continue
 		}
-		if acc.RefreshRetryAt > float64(time.Now().Unix()) {
+		if acc.RefreshRetryAt > float64(time.Now().Unix()) || acc.IsCoolingDown() {
+			skipped++
+			continue
+		}
+		// A cold account (no token in memory) is only signed in when a request
+		// actually needs it: boot-time sign-ins for the whole pool are exactly
+		// the burst that invites a risk refusal.
+		if strings.TrimSpace(acc.Token) == "" {
 			skipped++
 			continue
 		}

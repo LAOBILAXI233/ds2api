@@ -223,6 +223,12 @@ func (h *Handler) toggleAccountEnabled(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			c.Accounts[i].Disabled = !enabled
+			if enabled {
+				// Re-enabling a retired account must not leave the old reason
+				// behind: the console shows it next to an enabled row and reads
+				// as "enabled but broken".
+				c.Accounts[i].DisabledReason = ""
+			}
 			current = c.Accounts[i].IsEnabled()
 			return nil
 		}
@@ -257,6 +263,9 @@ func (h *Handler) batchToggleAccountEnabled(w http.ResponseWriter, r *http.Reque
 		total = len(c.Accounts)
 		for i := range c.Accounts {
 			c.Accounts[i].Disabled = !enabled
+			if enabled {
+				c.Accounts[i].DisabledReason = ""
+			}
 		}
 		return nil
 	})

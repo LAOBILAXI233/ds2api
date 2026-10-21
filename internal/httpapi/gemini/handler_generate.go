@@ -79,7 +79,8 @@ func (h *Handler) handleGeminiDirect(w http.ResponseWriter, r *http.Request, str
 	}
 	a, err := h.Auth.Determine(r)
 	if err != nil {
-		writeGeminiError(w, http.StatusUnauthorized, err.Error())
+		status, detail := auth.ClientErrorStatus(err)
+		writeGeminiError(w, status, detail)
 		return true
 	}
 	defer h.Auth.Release(a)

@@ -133,7 +133,7 @@ flowchart LR
 | 统一 CORS 兼容 | `/v1/*`、`/anthropic/*`、`/v1beta/models/*`、`/api/*`、`/admin/*` 统一走同一套 CORS 策略；Vercel 上 `/v1/chat/completions` 的 Node Runtime 也对齐相同放行规则，尽量减少第三方预检请求头限制 |
 | 多账号轮询 | 自动 token 刷新、邮箱/手机号双登录方式 |
 | 账号登录对齐 | 登录请求体固定 6 个字段（`email`/`mobile`/`password`/`area_code`/`device_id`/`os`），Referer 指向 `/sign_in`，登录后自动执行 `check_device`（含服务端下发的令牌轮换指令）与禁言早检；新账号的 `device_id` 为 UUID 形态 |
-| 令牌刷新 | 借鉴 ds-free-api 的刷新机制，去掉其风控高风险部分：**单飞刷新**（一个账号并发失效只登录一次）、**失败分类**（凭据错/禁言/封禁/设备校验属终止性，立即停用且不再重试；网络类失败指数退避，连续 3 次才停用）、**后台巡检**（每 60s：令牌超过 `runtime.token_refresh_interval_hours` 才换；年龄未知的令牌先用 `/users/current` 校验，通过就只记录年龄；退避未到期的不碰）、**手动重登**（`POST /admin/accounts/{identifier}/relogin`，成功后自动解除因刷新失败造成的停用）。令牌年龄与失败计数持久化在账号记录里 |
+| 令牌刷新 | 借鉴 ds-free-api 的刷新机制并去掉其高风险动作：**单飞刷新**（一个账号并发失效只登录一次）、**失败分类**（凭据错 `2` / 封禁 `10` → 停用待人工；设备校验 `11` 与禁言 `5` → 只冷却不淘汰；网络类失败指数退避，连续 3 次才停用）、**登录闸门**（上游一旦以 `RISK_DEVICE_DETECTED` 拒绝，全局暂停登录并按 10 分钟起、最长 2 小时退避，期间直接返回 503，不再逐个账号撞接口）、**冷号不预热**（重启后不会把整个号池一次性登录，按需登录）、**后台巡检**（每 60s：只处理已有令牌的账号；过期才换；年龄未知先 `/users/current` 校验）、**手动重登**（`POST /admin/accounts/{identifier}/relogin`）。令牌年龄与失败计数持久化在账号记录里 |
 | 账号预热 | 启动后后台预热各账号：登录/续期 → `/users/current` 校验 → `check_device` → 预取风控令牌；首个请求不再为冷启动付费。`runtime.warm_up_on_startup=false` 可关闭 |
 | 风控令牌回传 | 按账号设备身份缓存并回传网页端的 `x-hif-leim` / `x-hif-dliq`（`hif-leim.deepseek.com` / `hif-dliq.deepseek.com`，TTL 取自 `x-hif-ttl`，失败自动退避且不影响业务请求）。`runtime.hif_tokens=false` 或 `DS2API_HIF_TOKENS=0` 可关闭 |
 | 令牌导入 | `POST /admin/accounts/import-token`：粘贴网页端 `userToken` 即可入库账号，先用 `/users/current` 校验有效性并取回邮箱/手机号作为标识 |
@@ -377,7 +377,7 @@ Gemini 路由还可以使用 `x-goog-api-key`，或在没有认证头时使用 `
 | 附件与思考互斥 | 客户端带来的 `ref_file_ids` 轮次自动关闭思考，上传接口带 `x-thinking-enabled: 0`，与网页端一致；`current_input_file` 拆出的历史文件不在此列（仍保留思考） |
 | 风控令牌 | `x-hif-leim` / `x-hif-dliq` 按账号设备缓存并回传在生成请求上，TTL 取响应头 `x-hif-ttl`，取不到就不带该头 |
 | 预热 | 启动后台预热（登录/续期 → `users/current` → `check_device` → 风控令牌），不打消息、不消耗额度、不会因此触发禁言 |
-| 令牌刷新 | 单飞刷新 + 失败分类 + 60s 巡检：令牌有效就不动它（年龄未知时只用 `users/current` 校验），终止性拒绝立即停用不再重试，网络类失败退避至多 3 次；`POST /admin/accounts/{identifier}/relogin` 手动重登 |
+| 令牌刷新 | 单飞刷新 + 失败分类 + 登录闸门 + 60s 巡检：令牌有效就不动它（年龄未知时只用 `users/current` 校验）；设备/禁言类拒绝只冷却、凭据/封禁才停用；上游拒登时全局退避并给客户端 503，而不是逐个账号撞接口；`POST /admin/accounts/{identifier}/relogin` 手动重登 |
 | 续写去重 | `continue` / `resume` 拼接的流只向客户端发一个 `[DONE]`，思考内容按 overlap 去重 |
 
 > 说明：`docs/prompt-compatibility.md` 仍是「API → 纯文本网页上下文」的唯一事实来源，协议对齐的细节以其为准。

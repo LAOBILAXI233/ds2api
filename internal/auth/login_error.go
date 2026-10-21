@@ -1,6 +1,9 @@
 package auth
 
-import "strconv"
+import (
+	"errors"
+	"strconv"
+)
 
 // Login refusals, classified.
 //
@@ -61,15 +64,18 @@ func IsTerminalLoginCode(code int) bool {
 	}
 }
 
-// IsTerminalLoginError asks whether an error (of any type) is a refusal that
-// must not be retried.
+// IsTerminalLoginError asks whether an error (of any type, possibly wrapped) is a
+// refusal that must not be retried.
 func IsTerminalLoginError(err error) bool {
-	loginErr, ok := err.(*LoginError)
+	loginErr, ok := AsLoginError(err)
 	return ok && loginErr.Terminal
 }
 
 // AsLoginError unwraps a classification, if the error carries one.
 func AsLoginError(err error) (*LoginError, bool) {
-	loginErr, ok := err.(*LoginError)
-	return loginErr, ok
+	var loginErr *LoginError
+	if errors.As(err, &loginErr) {
+		return loginErr, true
+	}
+	return nil, false
 }

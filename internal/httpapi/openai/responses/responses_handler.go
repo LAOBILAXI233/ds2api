@@ -52,11 +52,7 @@ func (h *Handler) GetResponseByID(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) Responses(w http.ResponseWriter, r *http.Request) {
 	a, err := h.Auth.Determine(r)
 	if err != nil {
-		status := http.StatusUnauthorized
-		detail := err.Error()
-		if err == auth.ErrNoAccount {
-			status = http.StatusTooManyRequests
-		}
+		status, detail := auth.ClientErrorStatus(err)
 		writeOpenAIError(w, status, detail)
 		return
 	}

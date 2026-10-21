@@ -111,23 +111,18 @@ func (c *Client) WarmUpAccount(ctx context.Context, acc config.Account) WarmUpAc
 		Account:        acc,
 		TriedAccounts:  map[string]bool{},
 	}
-	// 1. A token: reuse the stored one, or sign in with the password.
+	// 1. A token. Warm-up deliberately does NOT sign in: tokens are never
+	// persisted, so right after a restart every account has none, and signing
+	// in the whole pool at once is the very burst that makes upstream answer
+	// RISK_DEVICE_DETECTED for all of them. A cold account is signed in by the
+	// first request that needs it (one account at a time), which is also how the
+	// gateway behaved before warm-up existed.
 	if strings.TrimSpace(acc.Token) == "" {
-		token, err := c.Login(ctx, acc)
-		if err != nil {
-			result.Message = "login: " + err.Error()
-			return result
-		}
-		a.DeepSeekToken = token
-		a.Account.Token = token
-		if c.Store != nil {
-			if err := c.Store.UpdateAccountToken(a.AccountID, token); err != nil {
-				config.Logger.Warn("[warm_up] persisting login token failed", "account", a.AccountID, "error", err)
-			}
-		}
-	} else {
-		a.DeepSeekToken = strings.TrimSpace(acc.Token)
+		result.Message = "no token yet; will sign in on first use"
+		c.WarmUpHIF(ctx, a)
+		return result
 	}
+	a.DeepSeekToken = strings.TrimSpace(acc.Token)
 
 	// 2. Health: /users/current is the cheapest live-session check.
 	user, err := c.CurrentUser(ctx, a)

@@ -59,6 +59,12 @@ type Resolver struct {
 	// sign-in rather than one per request.
 	refreshMu    sync.Mutex
 	refreshGates map[string]*refreshGate
+
+	// riskMu guards the sign-in circuit breaker (see risk.go): once upstream
+	// answers a sign-in as risky, no further attempt is made until it expires.
+	riskMu      sync.Mutex
+	riskUntil   time.Time
+	riskStrikes int
 }
 
 func NewResolver(store *config.Store, pool *account.Pool, login LoginFunc) *Resolver {
@@ -96,6 +102,12 @@ func (r *Resolver) Determine(req *http.Request) (*RequestAuth, error) {
 }
 
 func (r *Resolver) acquireManagedRequestAuth(ctx context.Context, callerID, target string, toolsEnabled bool) (*RequestAuth, error) {
+	// While upstream is refusing sign-ins nothing here can succeed, and walking
+	// the pool would only add more refusals: answer straight away with the
+	// cooldown, which the handlers render as a 503.
+	if remaining := r.riskCooldownRemaining(); remaining > 0 {
+		return nil, &RiskCooldownError{Until: time.Now().Add(remaining), Cause: errRiskCause}
+	}
 	tried := map[string]bool{}
 	var lastEnsureErr error
 	filter := account.AccountFilter(func(acc config.Account) bool {

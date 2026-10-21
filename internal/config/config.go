@@ -50,6 +50,16 @@ type Account struct {
 	// 在收到验证码挑战后主动设置的——挑战意味着风控已经盯上这个账号，
 	// 继续用它只会把情况变得更糟。
 	CooldownUntil float64 `json:"cooldown_until,omitempty"`
+	// TokenRefreshedAt 是令牌最近一次成功登录/刷新的 Unix 秒时间戳。
+	// 持久化它，是为了让"令牌有多老"跨进程重启仍然成立——重启不该成为
+	// 重新登录每个账号的理由。
+	TokenRefreshedAt float64 `json:"token_refreshed_at,omitempty"`
+	// RefreshFailures 是连续刷新失败次数；一次成功即清零。
+	RefreshFailures int `json:"refresh_failures,omitempty"`
+	// RefreshError 是最近一次刷新失败的可读原因（诊断用）。
+	RefreshError string `json:"refresh_error,omitempty"`
+	// RefreshRetryAt 是失败退避后允许再次尝试刷新的 Unix 秒时间戳。
+	RefreshRetryAt float64 `json:"refresh_retry_at,omitempty"`
 }
 
 type APIKey struct {
@@ -173,6 +183,13 @@ type RuntimeConfig struct {
 	AccountMaxQueue           int `json:"account_max_queue,omitempty"`
 	GlobalMaxInflight         int `json:"global_max_inflight,omitempty"`
 	TokenRefreshIntervalHours int `json:"token_refresh_interval_hours,omitempty"`
+	// HIFTokens 控制是否在 completion / continue / resume 请求上回传网页端
+	// 风控令牌 x-hif-leim / x-hif-dliq。nil = 默认开启（与网页端一致）。
+	// 令牌按账号自己的 X-Device-Id 缓存，多账号不会共用同一份。
+	HIFTokens *bool `json:"hif_tokens,omitempty"`
+	// WarmUpOnStartup 控制启动时是否预热各账号（登录/续期 + 令牌 + 风控令牌），
+	// nil = 默认开启。关闭后账号在首个请求到来时才登录。
+	WarmUpOnStartup *bool `json:"warm_up_on_startup,omitempty"`
 }
 
 type ResponsesConfig struct {

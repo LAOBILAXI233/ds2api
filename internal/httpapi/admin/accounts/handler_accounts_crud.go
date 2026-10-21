@@ -83,6 +83,12 @@ func (h *Handler) listAccounts(w http.ResponseWriter, r *http.Request) {
 			"banned":          acc.IsBanned(),
 			"muted":           acc.IsMuted(),
 			"muted_until":     acc.MutedUntil,
+			// Token refresh bookkeeping: why an account was retired, and how
+			// old its token is.
+			"token_refreshed_at": acc.TokenRefreshedAt,
+			"refresh_failures":   acc.RefreshFailures,
+			"refresh_error":      acc.RefreshError,
+			"refresh_retry_at":   acc.RefreshRetryAt,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total, "page": page, "page_size": pageSize, "total_pages": totalPages})

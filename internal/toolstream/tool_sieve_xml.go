@@ -92,6 +92,14 @@ func consumeXMLToolCapture(captured string, toolNames []string) (prefix string, 
 				}
 				return prefixPart + captured[invokeTag.Start:closeTag.End+1], nil, suffixPart, true
 			}
+			// DSML blocks arrive without the `<tool_calls>` wrapper often
+			// enough that waiting for one would strand the whole capture: a
+			// complete invoke block in the web client's own markup is final.
+			if toolcall.ContainsDSMLMarker(captured) {
+				if parsed, complete := toolcall.ParseCompleteInvokeBlocks(captured[invokeTag.Start:]); complete && len(parsed) > 0 {
+					return captured[:invokeTag.Start], parsed, "", true
+				}
+			}
 		}
 	}
 	return "", nil, "", false

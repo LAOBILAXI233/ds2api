@@ -1,6 +1,10 @@
 package toolstream
 
-import "ds2api/internal/toolcall"
+import (
+	"strings"
+
+	"ds2api/internal/toolcall"
+)
 
 func ProcessChunk(state *State, chunk string, toolNames []string) []Event {
 	if state == nil {
@@ -186,7 +190,33 @@ func splitSafeContentForToolDetection(state *State, s string) (safe, hold string
 		}
 		return "", s
 	}
+	// A `<tool_call>` marker a delta cut in half is held the same way, so the
+	// JSON block form cannot leak its opening tag into the reply.
+	if jsonIdx := findPartialJSONToolCallStart(s); jsonIdx >= 0 && !insideCodeFenceWithState(state, s[:jsonIdx]) {
+		if jsonIdx > 0 {
+			return s[:jsonIdx], s[jsonIdx:]
+		}
+		return "", s
+	}
 	return s, ""
+}
+
+// findPartialJSONToolCallStart returns the index of a tail that could still grow
+// into `<tool_call>`.
+func findPartialJSONToolCallStart(s string) int {
+	lastLT := lastToolMarkupStartDelimiterIndex(s)
+	if lastLT < 0 {
+		return -1
+	}
+	start := includeDuplicateLeadingLessThan(s, lastLT)
+	tail := s[start:]
+	if strings.Contains(tail, ">") || strings.Contains(tail, "＞") {
+		return -1
+	}
+	if toolcall.IsPartialJSONToolCallPrefix(tail) {
+		return start
+	}
+	return -1
 }
 
 const holdToolSegmentStart = -2
@@ -195,6 +225,24 @@ func findToolSegmentStart(state *State, s string) int {
 	if s == "" {
 		return -1
 	}
+	xmlStart := findXMLToolSegmentStart(state, s)
+	jsonStart := findJSONToolSegmentStart(state, s)
+	if xmlStart == holdToolSegmentStart || jsonStart == holdToolSegmentStart {
+		return holdToolSegmentStart
+	}
+	switch {
+	case xmlStart < 0:
+		return jsonStart
+	case jsonStart < 0:
+		return xmlStart
+	case xmlStart <= jsonStart:
+		return xmlStart
+	default:
+		return jsonStart
+	}
+}
+
+func findXMLToolSegmentStart(state *State, s string) int {
 	offset := 0
 	for {
 		tag, ok := toolcall.FindToolMarkupTagOutsideIgnored(s, offset)
@@ -299,12 +347,39 @@ func consumeToolCapture(state *State, toolNames []string) (prefix string, calls 
 	if xmlPrefix, xmlCalls, xmlSuffix, xmlReady := consumeXMLToolCapture(captured, toolNames); xmlReady {
 		return xmlPrefix, xmlCalls, xmlSuffix, true
 	}
+	// The JSON block form (`<tool_call>{…}</tool_call>`).
+	if jsonPrefix, jsonCalls, jsonSuffix, jsonReady := consumeJSONToolCapture(captured, toolNames); jsonReady {
+		return jsonPrefix, jsonCalls, jsonSuffix, true
+	}
 	// If XML tags are present but block is incomplete, keep buffering.
 	if hasOpenXMLToolTag(captured) {
+		return "", nil, "", false
+	}
+	// Same for a JSON block that has not reached its closing tag yet: it must
+	// not be released as text while it can still become a call.
+	if hasOpenJSONToolCall(captured) {
 		return "", nil, "", false
 	}
 	if shouldKeepBareInvokeCapture(captured) {
 		return "", nil, "", false
 	}
 	return captured, nil, "", true
+}
+
+// hasOpenJSONToolCall reports whether captured holds a JSON tool-call block that
+// has an opening marker and a JSON body but no closing tag yet.
+func hasOpenJSONToolCall(captured string) bool {
+	start, ok := toolcall.FindJSONToolCallStart(captured, 0)
+	if !ok {
+		return false
+	}
+	bodyStart := start + len(toolcall.JSONToolCallOpen)
+	if bodyStart >= len(captured) {
+		return true
+	}
+	closeIdx := strings.Index(strings.ToLower(captured[bodyStart:]), toolcall.JSONToolCallClose)
+	if closeIdx >= 0 {
+		return false
+	}
+	return len(captured) <= jsonToolCallRunaway
 }

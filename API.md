@@ -149,6 +149,8 @@ Gemini 兼容客户端还可以使用 `x-goog-api-key`、`?key=` 或 `?api_key=`
 | POST | `/admin/proxies/test` | Admin | 测试代理连通性 |
 | GET | `/admin/accounts` | Admin | 分页账号列表 |
 | POST | `/admin/accounts` | Admin | 添加账号 |
+| POST | `/admin/accounts/import-token` | Admin | 用网页端 `userToken` 导入/更新账号（先校验有效性） |
+| POST | `/admin/accounts/{identifier}/relogin` | Admin | 立即重新登录该账号（单飞；成功后可解除刷新失败造成的停用） |
 | PUT | `/admin/accounts/{identifier}` | Admin | 更新账号 name/remark |
 | DELETE | `/admin/accounts/{identifier}` | Admin | 删除账号 |
 | PUT | `/admin/accounts/{identifier}/proxy` | Admin | 为账号绑定/解绑代理 |
@@ -769,7 +771,7 @@ data: {"type":"message_stop"}
 
 - `success`
 - `admin`（`has_password_hash`、`jwt_expire_hours`、`jwt_valid_after_unix`、`default_password_warning`）
-- `runtime`（`account_max_inflight`、`account_max_queue`、`global_max_inflight`、`token_refresh_interval_hours`）
+- `runtime`（`account_max_inflight`、`account_max_queue`、`global_max_inflight`、`token_refresh_interval_hours`、`hif_tokens`、`warm_up_on_startup`；后两者为布尔值，默认均为 `true`）
 - `responses` / `embeddings`
 - `auto_delete`（`mode`：`none` / `single` / `all`；旧配置 `sessions=true` 仍按 `all` 处理）
 - `current_input_file`（`enabled` 默认返回 `false`、`min_chars`）
@@ -785,7 +787,7 @@ data: {"type":"message_stop"}
 热更新运行时设置。支持更新：
 
 - `admin.jwt_expire_hours`
-- `runtime.account_max_inflight` / `runtime.account_max_queue` / `runtime.global_max_inflight` / `runtime.token_refresh_interval_hours`
+- `runtime.account_max_inflight` / `runtime.account_max_queue` / `runtime.global_max_inflight` / `runtime.token_refresh_interval_hours` / `runtime.hif_tokens` / `runtime.warm_up_on_startup`
 - `responses.store_ttl_seconds`
 - `embeddings.provider`
 - `auto_delete.mode`
@@ -911,6 +913,47 @@ data: {"type":"message_stop"}
 ```
 
 **响应**：`{"success": true, "total_accounts": 6}`
+
+### `POST /admin/accounts/import-token`
+
+用网页端会话令牌（`userToken`）直接导入账号，无需密码。服务端先用 `GET /api/v0/users/current` 校验令牌是否仍然有效，并用返回的邮箱 / 手机号作为账号标识；同标识账号已存在时只替换令牌（并清除此前 `USER_IS_BANNED` 留下的停用标记）。
+
+```json
+{"token": "网页端 userToken", "name": "可选名称", "remark": "可选备注", "locale": "zh_CN"}
+```
+
+令牌取自已登录 `chat.deepseek.com` 的标签页控制台：
+
+```js
+JSON.parse(localStorage.getItem("userToken")).value
+```
+
+**响应**：
+
+```json
+{"ok": true, "identifier": "user@example.com", "email": "user@example.com", "mobile": "", "created": true, "updated": false, "user_id": "…", "muted": false, "mute_until": 0}
+```
+
+令牌被上游拒绝时返回 `400`，`detail` 说明原因，`hint` 提示重新复制令牌。
+
+### `POST /admin/accounts/{identifier}/relogin`
+
+立即对该账号执行一次令牌刷新（同一账号并发调用只会真正登录一次）。请求体可选：
+
+```json
+{"clear": true}
+```
+
+- `clear`（默认 `true`）：成功后清除账号的停用/封禁标记与刷新失败计数，使其重新参与调度；置 `false` 则只换令牌、保留账号状态。
+- 终止性拒绝（密码错误 / 禁言 / 封禁 / 设备校验失败）返回 `400`，并带 `terminal: true`——这类失败重试不会改变结果，刷新策略同样不会自动重试。
+
+**响应**：
+
+```json
+{"success": true, "identifier": "user@example.com", "disabled": false, "disabled_reason": "", "banned": false, "token_refreshed": true, "refresh_failures": 0}
+```
+
+> 账号列表（`GET /admin/accounts`）同时返回 `token_refreshed_at`、`refresh_failures`、`refresh_error`、`refresh_retry_at`，用于判断"为什么这个号停用了"。
 
 ### `PUT /admin/accounts/{identifier}`
 

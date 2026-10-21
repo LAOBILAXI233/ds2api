@@ -47,7 +47,7 @@ func (c *Client) ReportClientSettings(ctx context.Context, a *auth.RequestAuth, 
 
 func (c *Client) fetchClientSettingsScope(ctx context.Context, a *auth.RequestAuth, deviceID string, scope string) (map[string]any, error) {
 	clients := c.requestClientsForAuth(ctx, a)
-	headers := c.authHeaders(a.DeepSeekToken, a.Account.Locale)
+	headers := c.authHeadersForAuth(a)
 	headers["Accept"] = "application/json"
 	query := url.Values{}
 	query.Set("did", deviceID)
@@ -65,7 +65,7 @@ func (c *Client) fetchClientSettingsScope(ctx context.Context, a *auth.RequestAu
 
 func (c *Client) postClientSettingsReport(ctx context.Context, a *auth.RequestAuth, deviceID string, settingsIDs []int, ssoID string) error {
 	clients := c.requestClientsForAuth(ctx, a)
-	headers := c.authHeaders(a.DeepSeekToken, a.Account.Locale)
+	headers := c.authHeadersForAuth(a)
 	payload := map[string]any{
 		"settings_ids": settingsIDs,
 		"did":          clientSettingsReportDID(deviceID),

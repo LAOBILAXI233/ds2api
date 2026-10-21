@@ -38,7 +38,7 @@ func (c *Client) DeleteSession(ctx context.Context, a *auth.RequestAuth, session
 	refreshed := false
 
 	for attempts < maxAttempts {
-		headers := c.authHeaders(a.DeepSeekToken, a.Account.Locale)
+		headers := c.authHeadersForAuth(a)
 
 		payload := map[string]any{
 			"chat_session_id": sessionID,
@@ -118,7 +118,7 @@ func (c *Client) DeleteSessionForToken(ctx context.Context, token string, sessio
 // DeleteAllSessions 删除所有会话（谨慎使用）
 func (c *Client) DeleteAllSessions(ctx context.Context, a *auth.RequestAuth) error {
 	clients := c.requestClientsForAuth(ctx, a)
-	headers := c.authHeaders(a.DeepSeekToken, a.Account.Locale)
+	headers := c.authHeadersForAuth(a)
 	payload := map[string]any{}
 
 	resp, status, err := c.postJSONWithStatus(ctx, clients.regular, clients.fallback, dsprotocol.DeepSeekDeleteAllSessionsURL, headers, payload)

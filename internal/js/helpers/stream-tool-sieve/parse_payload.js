@@ -6,6 +6,11 @@ const TOOL_MARKUP_NAMES = [
   { raw: 'tool_calls', canonical: 'tool_calls' },
   { raw: 'tool-calls', canonical: 'tool_calls', epseOnly: true },
   { raw: 'toolcalls', canonical: 'tool_calls', epseOnly: true },
+  // The web client's own agent format wraps calls in
+  // `<｜｜DSML｜｜ calls>` … `</｜｜DSML｜｜ calls>`; the wrapper's local name is
+  // "calls". Only the shelled form counts, so `<calls>` and `<tool-calls>`
+  // stay text (kept in step with the Go implementation).
+  { raw: 'calls', canonical: 'tool_calls', epseOnly: true, shellOnly: true },
   { raw: 'invoke', canonical: 'invoke' },
   { raw: 'parameter', canonical: 'parameter' },
 ];
@@ -590,7 +595,7 @@ function scanToolMarkupTagAt(text, start) {
   const prefixStart = i;
   i = prefix.next;
   let epseLike = prefix.epseLike;
-  let { name, len } = matchToolMarkupName(raw, i, epseLike);
+  let { name, len } = matchToolMarkupName(raw, prefixStart, i, epseLike);
   if (!name) {
     const fallback = matchToolMarkupNameAfterArbitraryPrefix(raw, prefixStart);
     if (!fallback.ok) {
@@ -805,6 +810,9 @@ function matchToolMarkupNameAfterArbitraryPrefix(raw, start) {
       if (!matched.ok) {
         continue;
       }
+      if (name.shellOnly && !prefixCarriesDSMLMarker(raw.slice(start, idx))) {
+        continue;
+      }
       if (!toolMarkupPrefixAllowsLocalNameAt(raw, start, idx)) {
         continue;
       }
@@ -821,6 +829,13 @@ function hasPartialToolMarkupNameAfterArbitraryPrefix(raw, start) {
       return false;
     }
     if (toolMarkupPrefixAllowsLocalNameAt(raw, start, idx) && hasToolMarkupNamePrefix(raw, idx)) {
+      return true;
+    }
+    // A split `<｜｜DSML｜｜ cal` must still be held: the shell-only "calls"
+    // alias is not part of the generic name list.
+    if (toolMarkupPrefixAllowsLocalNameAt(raw, start, idx)
+      && prefixCarriesDSMLMarker(raw.slice(start, idx))
+      && isPartialCallsName(raw.slice(idx))) {
       return true;
     }
     if (toolMarkupPrefixAllowsLocalNameAt(raw, start, idx) && hasEPSENamePrefixOrPartial(raw, idx)) {
@@ -975,6 +990,11 @@ function consumeToolMarkupPrefixSegment(raw, idx) {
 
 function hasToolMarkupNamePrefix(raw, start) {
   for (const name of TOOL_MARKUP_NAMES) {
+    // A shell-only alias must not make an arbitrary prefix look like a tag
+    // shell: `<tool_calls>` has to keep parsing as the canonical wrapper.
+    if (name.shellOnly) {
+      continue;
+    }
     if (consumeToolKeyword(raw, start, name.raw).ok) {
       return true;
     }
@@ -1027,9 +1047,12 @@ function hasConfusablePartialKeywordPrefix(raw, start, keyword) {
   return matched > 0 && matched < keyword.length && idx === raw.length;
 }
 
-function matchToolMarkupName(raw, start, epseLike) {
+function matchToolMarkupName(raw, prefixStart, start, epseLike) {
   for (const name of TOOL_MARKUP_NAMES) {
     if (name.epseOnly && !epseLike) {
+      continue;
+    }
+    if (name.shellOnly && !prefixCarriesDSMLMarker(raw.slice(prefixStart, start))) {
       continue;
     }
     const matched = consumeToolKeyword(raw, start, name.raw);
@@ -2639,8 +2662,239 @@ function isOnlyRawValue(obj) {
   return keys.length === 1 && keys[0] === '_raw';
 }
 
+// ---------------------------------------------------------------------------
+// DSML (the web client's own agent markup) and the JSON tool-call block.
+// Kept byte-for-byte in step with internal/toolcall/toolcalls_dsml_calls.go and
+// toolcalls_json_call.go: the Vercel Node runtime parses with this module, and
+// both runtimes must agree on what is a call and what is text.
+// ---------------------------------------------------------------------------
+
+const DSML_CALLS_NAME = 'calls';
+const JSON_TOOL_CALL_OPEN = '<tool_call>';
+const JSON_TOOL_CALL_CLOSE = '</tool_call>';
+
+function prefixCarriesDSMLMarker(prefix) {
+  return toStringSafe(prefix).toLowerCase().includes('dsml');
+}
+
+function isPartialCallsName(text) {
+  const lower = toStringSafe(text).toLowerCase();
+  if (!lower || lower.length >= DSML_CALLS_NAME.length) {
+    return false;
+  }
+  return DSML_CALLS_NAME.startsWith(lower);
+}
+
+function containsDSMLMarker(text) {
+  const raw = toStringSafe(text);
+  if (!raw || !raw.toLowerCase().includes('dsml')) {
+    return false;
+  }
+  const lower = raw.toLowerCase();
+  for (let i = 0; i < raw.length;) {
+    const lt = consumeToolMarkupLessThan(raw, i);
+    if (!lt.ok) {
+      i += 1;
+      continue;
+    }
+    const prefix = consumeToolMarkupNamePrefix(raw, lower, lt.next);
+    if (lower.slice(prefix.next).startsWith('dsml')) {
+      return true;
+    }
+    if (lower.slice(lt.next).startsWith('dsml')) {
+      return true;
+    }
+    i = lt.next;
+  }
+  return false;
+}
+
+function isClosingWrapperOnly(text) {
+  let rest = toStringSafe(text);
+  while (rest) {
+    const tag = findToolMarkupTagOutsideIgnored(rest, 0);
+    if (!tag || !tag.closing || tag.start !== 0) {
+      return false;
+    }
+    rest = rest.slice(tag.end + 1).trim();
+  }
+  return true;
+}
+
+function parseCompleteInvokeBlocks(text) {
+  const raw = toStringSafe(text);
+  if (!raw.trim()) {
+    return { calls: [], complete: false };
+  }
+  const normalized = normalizeEPSEToolCallMarkup(raw).text;
+  const invokes = findXmlElementBlocks(normalized, 'invoke');
+  if (!invokes.length) {
+    return { calls: [], complete: false };
+  }
+  const calls = [];
+  for (const block of invokes) {
+    const call = parseMarkupSingleToolCall(block);
+    if (!call) {
+      return { calls: [], complete: false };
+    }
+    calls.push(call);
+  }
+  const tail = normalized.slice(invokes[invokes.length - 1].end).trim();
+  if (tail && !isClosingWrapperOnly(tail)) {
+    return { calls: [], complete: false };
+  }
+  return { calls, complete: true };
+}
+
+function parseDSMLToolCalls(text) {
+  const raw = toStringSafe(text);
+  if (!containsDSMLMarker(raw)) {
+    return [];
+  }
+  const parsed = parseCompleteInvokeBlocks(raw);
+  return parsed.complete ? parsed.calls : [];
+}
+
+function jsonToolCallFence(body) {
+  let text = toStringSafe(body).trim();
+  if (!text.startsWith('```')) {
+    return text;
+  }
+  text = text.slice(3);
+  const newline = text.indexOf('\n');
+  text = newline >= 0 ? text.slice(newline + 1) : '';
+  text = text.trim();
+  if (text.endsWith('```')) {
+    text = text.slice(0, -3);
+  }
+  return text.trim();
+}
+
+function parseJSONToolCallObject(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  let name = typeof value.name === 'string' ? value.name.trim() : '';
+  if (!name && value.function && typeof value.function === 'object') {
+    name = typeof value.function.name === 'string' ? value.function.name.trim() : '';
+  }
+  if (!name) {
+    return null;
+  }
+  let args;
+  for (const key of ['arguments', 'parameters', 'input']) {
+    if (Object.prototype.hasOwnProperty.call(value, key)) {
+      args = value[key];
+      break;
+    }
+  }
+  let input = {};
+  if (args && typeof args === 'object' && !Array.isArray(args)) {
+    input = args;
+  } else if (typeof args === 'string' && args.trim().startsWith('{')) {
+    try {
+      const parsed = JSON.parse(args);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        input = parsed;
+      }
+    } catch (_err) {
+      input = {};
+    }
+  }
+  return { name, input };
+}
+
+function parseJSONToolCallBody(body) {
+  const text = jsonToolCallFence(body);
+  if (!text) {
+    return [];
+  }
+  try {
+    if (text.startsWith('[')) {
+      const items = JSON.parse(text);
+      if (!Array.isArray(items)) {
+        return [];
+      }
+      const calls = [];
+      for (const item of items) {
+        const call = parseJSONToolCallObject(item);
+        if (call) {
+          calls.push(call);
+        }
+      }
+      return calls;
+    }
+    const call = parseJSONToolCallObject(JSON.parse(text));
+    return call ? [call] : [];
+  } catch (_err) {
+    return [];
+  }
+}
+
+function parseJSONToolCallBlocks(text) {
+  const raw = toStringSafe(text);
+  const lower = raw.toLowerCase();
+  if (!lower.includes(JSON_TOOL_CALL_OPEN)) {
+    return [];
+  }
+  const calls = [];
+  let pos = 0;
+  while (pos < raw.length) {
+    const open = lower.indexOf(JSON_TOOL_CALL_OPEN, pos);
+    if (open < 0) {
+      break;
+    }
+    const bodyStart = open + JSON_TOOL_CALL_OPEN.length;
+    const close = lower.indexOf(JSON_TOOL_CALL_CLOSE, bodyStart);
+    if (close < 0) {
+      break;
+    }
+    calls.push(...parseJSONToolCallBody(raw.slice(bodyStart, close)));
+    pos = close + JSON_TOOL_CALL_CLOSE.length;
+  }
+  return calls;
+}
+
+function findJSONToolCallStart(text, from) {
+  const raw = toStringSafe(text);
+  const lower = raw.toLowerCase();
+  let pos = Math.max(0, from || 0);
+  while (pos < lower.length) {
+    const open = lower.indexOf(JSON_TOOL_CALL_OPEN, pos);
+    if (open < 0) {
+      return { start: -1, ok: false };
+    }
+    const rest = raw.slice(open + JSON_TOOL_CALL_OPEN.length).replace(/^[ \t\r\n]+/, '');
+    if (rest.startsWith('{') || rest.startsWith('[')) {
+      return { start: open, ok: true };
+    }
+    pos = open + JSON_TOOL_CALL_OPEN.length;
+  }
+  return { start: -1, ok: false };
+}
+
+function isPartialJSONToolCallPrefix(text) {
+  const raw = toStringSafe(text);
+  if (!raw.startsWith('<')) {
+    return false;
+  }
+  const lower = raw.toLowerCase();
+  if (lower.length >= JSON_TOOL_CALL_OPEN.length) {
+    return false;
+  }
+  return JSON_TOOL_CALL_OPEN.startsWith(lower);
+}
 module.exports = {
   stripFencedCodeBlocks,
+  containsDSMLMarker,
+  parseCompleteInvokeBlocks,
+  parseDSMLToolCalls,
+  parseJSONToolCallBody,
+  parseJSONToolCallBlocks,
+  findJSONToolCallStart,
+  isPartialJSONToolCallPrefix,
+  JSON_TOOL_CALL_OPEN,
+  JSON_TOOL_CALL_CLOSE,
   stripMarkdownCodeSpans,
   parseMarkupToolCalls,
   normalizeEPSEToolCallMarkup,

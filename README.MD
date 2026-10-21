@@ -6,7 +6,6 @@
 
 ## 注：本项目由原作者版本([CJackHwang/ds2api](https://github.com/CJackHwang/ds2api)) 二次开发而来。原仓库现已归档
 
-### 在保留核心功能的基础上做出了若干修改，主要解决deepseek封号问题。效果显著(?) 实测目前个人使用几乎已无禁言封号风险
 
 
 
@@ -52,6 +51,7 @@
   - [方式四：本地源码运行](#方式四本地源码运行)
 - [配置说明](#配置说明)
 - [鉴权模式](#鉴权模式)
+- [网页端协议对齐](#网页端协议对齐)
 - [并发模型](#并发模型)
 - [Tool Call 适配](#tool-call-适配)
 - [本地开发抓包工具](#本地开发抓包工具)
@@ -132,9 +132,15 @@ flowchart LR
 | Ollama 兼容 | `GET /api/version`、`GET /api/tags`、`POST /api/show` |
 | 统一 CORS 兼容 | `/v1/*`、`/anthropic/*`、`/v1beta/models/*`、`/api/*`、`/admin/*` 统一走同一套 CORS 策略；Vercel 上 `/v1/chat/completions` 的 Node Runtime 也对齐相同放行规则，尽量减少第三方预检请求头限制 |
 | 多账号轮询 | 自动 token 刷新、邮箱/手机号双登录方式 |
+| 账号登录对齐 | 登录请求体固定 6 个字段（`email`/`mobile`/`password`/`area_code`/`device_id`/`os`），Referer 指向 `/sign_in`，登录后自动执行 `check_device`（含服务端下发的令牌轮换指令）与禁言早检；新账号的 `device_id` 为 UUID 形态 |
+| 令牌刷新 | 借鉴 ds-free-api 的刷新机制，去掉其风控高风险部分：**单飞刷新**（一个账号并发失效只登录一次）、**失败分类**（凭据错/禁言/封禁/设备校验属终止性，立即停用且不再重试；网络类失败指数退避，连续 3 次才停用）、**后台巡检**（每 60s：令牌超过 `runtime.token_refresh_interval_hours` 才换；年龄未知的令牌先用 `/users/current` 校验，通过就只记录年龄；退避未到期的不碰）、**手动重登**（`POST /admin/accounts/{identifier}/relogin`，成功后自动解除因刷新失败造成的停用）。令牌年龄与失败计数持久化在账号记录里 |
+| 账号预热 | 启动后后台预热各账号：登录/续期 → `/users/current` 校验 → `check_device` → 预取风控令牌；首个请求不再为冷启动付费。`runtime.warm_up_on_startup=false` 可关闭 |
+| 风控令牌回传 | 按账号设备身份缓存并回传网页端的 `x-hif-leim` / `x-hif-dliq`（`hif-leim.deepseek.com` / `hif-dliq.deepseek.com`，TTL 取自 `x-hif-ttl`，失败自动退避且不影响业务请求）。`runtime.hif_tokens=false` 或 `DS2API_HIF_TOKENS=0` 可关闭 |
+| 令牌导入 | `POST /admin/accounts/import-token`：粘贴网页端 `userToken` 即可入库账号，先用 `/users/current` 校验有效性并取回邮箱/手机号作为标识 |
 | 并发队列控制 | 每账号 in-flight 上限 + 等待队列，动态计算建议并发值 |
-| DeepSeek PoW | 纯 Go 高性能实现（DeepSeekHashV1），毫秒级响应 |
-| Tool Calling | 防泄漏处理：非代码块高置信特征识别、`delta.tool_calls` 早发、结构化增量输出 |
+| DeepSeek PoW | 纯 Go 高性能实现（DeepSeekHashV1），毫秒级响应；仅用于 `/chat/completion`（`continue` / `resume_stream` 按网页端行为不带 PoW） |
+| 空回复恢复 | 上游返回 `FINISHED` 但没有任何正文/思考/工具调用时，先按网页端行为用 `/chat/resume_stream` 重读该消息，仍为空才走原有空输出补偿重试 |
+| Tool Calling | 防泄漏处理：非代码块高置信特征识别、`delta.tool_calls` 早发、结构化增量输出；同时兼容 EPSE、旧式 canonical XML、网页端 DSML（`<｜｜DSML｜｜ calls>`）与 `<tool_call>{JSON}` 四种调用格式 |
 | Admin API | 配置管理、运行时设置热更新、代理管理、账号测试 / 批量测试、会话清理、导入导出、Vercel 同步、版本检查 |
 | WebUI 管理台 | `/admin` 单页应用（中英文双语、深色模式，支持查看服务器端对话记录） |
 | 运维探针 | `GET /healthz`（存活）、`GET /readyz`（就绪） |
@@ -335,7 +341,7 @@ go run ./cmd/ds2api
 - `keys` / `api_keys`：客户端访问密钥，`api_keys` 支持 `name` 与 `remark` 元信息，`keys` 继续兼容。
 - `accounts`：DeepSeek 托管账号，支持 `email` 或 `mobile` 登录，可配置代理、名称和备注。
 - `model_aliases`：OpenAI / Claude / Gemini 共用的模型 alias 映射。
-- `runtime`：账号并发、队列与 token 刷新策略，可通过 Admin Settings 热更新。
+- `runtime`：账号并发、队列、token 刷新策略、风控令牌回传（`hif_tokens`）与启动预热（`warm_up_on_startup`），可通过 Admin Settings 热更新。
 - `auto_delete.mode`：请求结束后的远端会话清理策略，支持 `none` / `single` / `all`。
 - `current_input_file`：全局生效的上下文拆分上传策略；默认关闭，开启且阈值为 `0` 时，触发时将完整上下文合并上传为 `DS2API_HISTORY.txt` 上下文文件。expert（pro）模型不支持文件上传，即使开启此选项也不会生成 `DS2API_HISTORY.txt`，客户端传入的文件引用也会被忽略。
 - 如果关闭 `current_input_file`，请求会直接透传，不上传拆分上下文文件。
@@ -357,6 +363,25 @@ go run ./cmd/ds2api
 未指定目标账号时，如果 completion 因上游 thinking-only 空输出在同账号补偿重试后仍将返回 `429 upstream_empty_output`，托管账号模式会自动切到下一个可用账号，新建 session，并用原始 payload 再 fresh retry 一次。
 Gemini 路由还可以使用 `x-goog-api-key`，或在没有认证头时使用 `?key=` / `?api_key=` 作为调用方凭据。
 
+## 网页端协议对齐
+
+网关与网页端（chat.deepseek.com）的行为对齐是本项目的维护重点。以下行为按「网页端实测 / 新一代插件实现」校准，改动都落在共享层，因此 OpenAI / Claude / Gemini / Vercel 路径同时生效：
+
+| 行为 | 说明 |
+| --- | --- |
+| 客户端版本 | `x-client-version: 2.4.0`，配合 Chrome 150 的 UA / `sec-ch-ua` / TLS 指纹 |
+| 设备身份 | 每个账号一个 `device_id`（新账号为 UUID 形态），登录载荷与 `X-Device-Id` / `X-Device-Model` 请求头一致，账号之间不共享设备 |
+| 登录序列 | `POST /users/login`（固定 6 字段，Referer `/sign_in`）→ `POST /users/auth_token/check_device`（带 `device_id`/`device_model`，处理 `rotate`）→ 客户端设置上报 → 关闭训练开关 |
+| PoW 作用域 | 只有 `/chat/completion` 解 PoW 并回传 `x-ds-pow-response`；`/chat/continue`、`/chat/resume_stream` 按网页端行为**不带** PoW（挑战的 `target_path` 不匹配会被判 `INVALID_TARGET_PATH`） |
+| 续写 / 重读 | `INCOMPLETE` / `AUTO_CONTINUE` → `/chat/continue`；`FINISHED` 但无任何内容 → `/chat/resume_stream`（各最多一次，随后仍交由空输出补偿重试兜底） |
+| 附件与思考互斥 | 客户端带来的 `ref_file_ids` 轮次自动关闭思考，上传接口带 `x-thinking-enabled: 0`，与网页端一致；`current_input_file` 拆出的历史文件不在此列（仍保留思考） |
+| 风控令牌 | `x-hif-leim` / `x-hif-dliq` 按账号设备缓存并回传在生成请求上，TTL 取响应头 `x-hif-ttl`，取不到就不带该头 |
+| 预热 | 启动后台预热（登录/续期 → `users/current` → `check_device` → 风控令牌），不打消息、不消耗额度、不会因此触发禁言 |
+| 令牌刷新 | 单飞刷新 + 失败分类 + 60s 巡检：令牌有效就不动它（年龄未知时只用 `users/current` 校验），终止性拒绝立即停用不再重试，网络类失败退避至多 3 次；`POST /admin/accounts/{identifier}/relogin` 手动重登 |
+| 续写去重 | `continue` / `resume` 拼接的流只向客户端发一个 `[DONE]`，思考内容按 overlap 去重 |
+
+> 说明：`docs/prompt-compatibility.md` 仍是「API → 纯文本网页上下文」的唯一事实来源，协议对齐的细节以其为准。
+
 ## 并发模型
 
 ```
@@ -376,13 +401,16 @@ Gemini 路由还可以使用 `x-goog-api-key`，或在没有认证头时使用 `
 当请求中带 `tools` 时，DS2API 会做防泄漏处理与结构化转译：
 
 1. 只在**非 Markdown 代码上下文**启用执行型 toolcall 识别（fenced code block 和行内 code span 中的示例默认不触发）
-2. 解析层当前把半角管道符 EPSE 外壳视为推荐可执行调用：`<|EPSE|tool_calls>` → `<|EPSE|invoke name="...">` → `<|EPSE|parameter name="...">`；兼容旧式 canonical XML `<tool_calls>` → `<invoke name="...">` → `<parameter name="...">`，以及若干 EPSE 前缀/分隔符漂移。EPSE 只是外壳别名，内部仍以 XML 解析语义为准；旧式 `<tools>` / `<tool_call>` / `<tool_name>` / `<param>`、`<function_call>`、`tool_use` / antml 变体与纯 JSON `tool_calls` 片段都会按普通文本处理，完整但 malformed 的 wrapper 也会作为普通文本释放
-3. `responses` 流式严格使用官方 item 生命周期事件（`response.output_item.*`、`response.content_part.*`、`response.function_call_arguments.*`）
-4. `responses` 支持并执行 `tool_choice`（`auto`/`none`/`required`/强制函数）；`required` 违规时非流式返回 `422`，流式返回 `response.failed`
-5. 客户端请求哪种协议，就按该协议返回工具调用（OpenAI/Claude/Gemini 各自原生结构）；模型侧优先约束输出规范 XML，再由兼容层转译
+2. 解析层当前把半角管道符 EPSE 外壳视为推荐可执行调用：`<|EPSE|tool_calls>` → `<|EPSE|invoke name="...">` → `<|EPSE|parameter name="...">`；兼容旧式 canonical XML `<tool_calls>` → `<invoke name="...">` → `<parameter name="...">`，以及若干 EPSE 前缀/分隔符漂移。EPSE 只是外壳别名，内部仍以 XML 解析语义为准；旧式 `<tools>` / `<tool_call><tool_name>` / `<param>`、`<function_call>`、`tool_use` / antml 变体与纯 JSON `tool_calls` 片段都会按普通文本处理，完整但 malformed 的 wrapper 也会作为普通文本释放
+3. **网页端 DSML 一等支持**：模型在 agent 语境下会直接输出网页端内部标记 `<｜｜DSML｜｜ calls>` → `<｜｜DSML｜｜ invoke name="...">` → `<｜｜DSML｜｜ parameter name="...">`，这类块会被识别为工具调用（带或不带 `calls` 包裹均可），解析失败时折入 `reasoning_content` 而不会混入正文。`<calls>` / `<tool-calls>` 这类无 DSML 外壳的相似标签仍按普通文本处理
+4. **`<tool_call>{JSON}</tool_call>`**：块体是可解析的 `{"name":…,"arguments"|"parameters"|"input":…}`（或它们的数组）时识别为工具调用；不含 JSON 的旧式 XML `<tool_call>` 仍按文本处理
+5. `responses` 流式严格使用官方 item 生命周期事件（`response.output_item.*`、`response.content_part.*`、`response.function_call_arguments.*`）
+6. `responses` 支持并执行 `tool_choice`（`auto`/`none`/`required`/强制函数）；`required` 违规时非流式返回 `422`，流式返回 `response.failed`
+7. 客户端请求哪种协议，就按该协议返回工具调用（OpenAI/Claude/Gemini 各自原生结构）；模型侧优先约束输出规范 XML，再由兼容层转译
 
-> 说明：当前版本 parser 层以”尽量解析成功”为优先，所有格式合法的 XML 工具调用都会通过，不做工具名 allow-list 过滤。
+> 说明：当前版本 parser 层以”尽量解析成功”为优先，所有格式合法的工具调用都会通过，不做工具名 allow-list 过滤。
 > 解析层会保留显式空字符串或纯空白参数；Prompt 会要求模型不要主动输出空参数，缺参/空命令的拒绝应由工具执行侧或客户端 schema 校验负责。
+> 四种格式的解析在 Go 主路径、Vercel Node 运行路径与 Go/Node 语义对齐测试中保持同一套判定（`internal/toolcall`、`internal/toolstream`、`internal/js/helpers/stream-tool-sieve`）。
 > 
 > 想评估”把工具调用封装成 XML 再输入模型”的方案，可参考：`docs/toolcall-semantics.md`。
 

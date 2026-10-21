@@ -28,7 +28,7 @@ func (c *Client) StopStream(ctx context.Context, a *auth.RequestAuth, sessionID 
 		return errors.New("missing stop_stream identifiers")
 	}
 	clients := c.requestClientsForAuth(ctx, a)
-	headers := c.authHeaders(a.DeepSeekToken, a.Account.Locale)
+	headers := c.authHeadersForAuth(a)
 	payload := map[string]any{
 		"chat_session_id": sessionID,
 		"message_id":      messageID,
@@ -51,7 +51,7 @@ func (c *Client) StopStream(ctx context.Context, a *auth.RequestAuth, sessionID 
 func (c *Client) FireCompletionAndStop(ctx context.Context, a *auth.RequestAuth, payload map[string]any, powResp string) (int, error) {
 	sessionID, _ := payload["chat_session_id"].(string)
 	clients := c.requestClientsForAuth(ctx, a)
-	headers := c.authHeaders(a.DeepSeekToken, a.Account.Locale)
+	headers := c.authHeadersForAuth(a)
 	headers["x-ds-pow-response"] = powResp
 	applySessionReferer(headers, payload)
 	captureSession := c.capture.Start("deepseek_completion", dsprotocol.DeepSeekCompletionURL, a.AccountID, payload)

@@ -141,6 +141,28 @@ func (s *Store) RuntimeTokenRefreshIntervalHours() int {
 	return 6
 }
 
+// RuntimeHIFTokensEnabled reports whether the web client's risk tokens
+// (x-hif-leim / x-hif-dliq) are attached to generation requests. Default on.
+func (s *Store) RuntimeHIFTokensEnabled() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.cfg.Runtime.HIFTokens == nil {
+		return true
+	}
+	return *s.cfg.Runtime.HIFTokens
+}
+
+// RuntimeWarmUpOnStartup reports whether accounts are logged in and their
+// tokens prefetched at boot instead of on the first request. Default on.
+func (s *Store) RuntimeWarmUpOnStartup() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.cfg.Runtime.WarmUpOnStartup == nil {
+		return true
+	}
+	return *s.cfg.Runtime.WarmUpOnStartup
+}
+
 func (s *Store) AutoDeleteSessions() bool {
 	return s.AutoDeleteMode() != "none"
 }

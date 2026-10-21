@@ -34,6 +34,7 @@ func BuildToolCallInstructions(toolNames []string) string {
 13) 如果调用工具，该工具代码块的第一个非空白字符必须严格为 <|EPSE|tool_calls>。
 14) 切勿省略起始标签 <|EPSE|tool_calls>，即使你打算随后使用 </|EPSE|tool_calls> 闭合标签。
 15) 兼容性说明：运行时环境也接受旧版 XML 标签 <tool_calls> / <invoke> / <parameter>，但建议优先使用上述带有 EPSE 前缀的格式。
+15a) 请勿输出 DSML（网页端内部工具标记），也不要使用 <tool_call> 包裹 JSON 的调用格式；这些标记仅供兼容解析，输出它们会浪费 token。
 
 参数格式：
 - string => <|EPSE|parameter name="x"><![CDATA[value]]></|EPSE|parameter>

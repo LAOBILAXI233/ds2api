@@ -229,9 +229,16 @@ func TestDetermineManagedAccountForcesRefreshEverySixHours(t *testing.T) {
 		t.Fatalf("expected no login before refresh interval, got %d", got)
 	}
 
-	resolver.mu.Lock()
-	resolver.tokenRefreshedAt["acc@example.com"] = time.Now().Add(-7 * time.Hour)
-	resolver.mu.Unlock()
+	if err := store.Update(func(c *config.Config) error {
+		for i := range c.Accounts {
+			if c.Accounts[i].Identifier() == "acc@example.com" {
+				c.Accounts[i].TokenRefreshedAt = float64(time.Now().Add(-7 * time.Hour).Unix())
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("age the token failed: %v", err)
+	}
 
 	a2, err := resolver.Determine(req)
 	if err != nil {
@@ -286,9 +293,16 @@ func TestDetermineManagedAccountUsesUpdatedRefreshInterval(t *testing.T) {
 		t.Fatalf("update runtime failed: %v", err)
 	}
 
-	resolver.mu.Lock()
-	resolver.tokenRefreshedAt["acc@example.com"] = time.Now().Add(-2 * time.Hour)
-	resolver.mu.Unlock()
+	if err := store.Update(func(c *config.Config) error {
+		for i := range c.Accounts {
+			if c.Accounts[i].Identifier() == "acc@example.com" {
+				c.Accounts[i].TokenRefreshedAt = float64(time.Now().Add(-2 * time.Hour).Unix())
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("age the token failed: %v", err)
+	}
 
 	a2, err := resolver.Determine(req)
 	if err != nil {

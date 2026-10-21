@@ -4,6 +4,8 @@ const {
   findToolMarkupTagOutsideIgnored,
   findMatchingToolMarkupClose,
   findPartialToolMarkupStart,
+  containsDSMLMarker,
+  parseCompleteInvokeBlocks,
 } = require('./parse_payload');
 
 function consumeXMLToolCapture(captured, toolNames, trimWrappingJSONFence) {
@@ -94,6 +96,19 @@ function consumeXMLToolCapture(captured, toolNames, trimWrappingJSONFence) {
           return { ready: true, prefix: prefixPart + captured.slice(invokeTag.start, closeTag.end + 1), calls: [], suffix: suffixPart };
         }
         return { ready: true, prefix: prefixPart + captured.slice(invokeTag.start, closeTag.end + 1), calls: [], suffix: suffixPart };
+      }
+      // A DSML block often arrives without the `<tool_calls>` wrapper; a
+      // complete invoke block in the web client's own markup is final.
+      if (containsDSMLMarker(captured)) {
+        const parsed = parseCompleteInvokeBlocks(captured.slice(invokeTag.start));
+        if (parsed.complete && parsed.calls.length > 0) {
+          return {
+            ready: true,
+            prefix: captured.slice(0, invokeTag.start),
+            calls: parsed.calls,
+            suffix: '',
+          };
+        }
       }
     }
   }

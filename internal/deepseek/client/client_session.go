@@ -47,7 +47,7 @@ func (c *Client) GetSessionCount(ctx context.Context, a *auth.RequestAuth, maxAt
 	refreshed := false
 
 	for attempts < maxAttempts {
-		headers := c.authHeaders(a.DeepSeekToken, a.Account.Locale)
+		headers := c.authHeadersForAuth(a)
 
 		// 构建请求 URL
 		reqURL := dsprotocol.DeepSeekFetchSessionURL + "?lte_cursor.pinned=false"
@@ -195,7 +195,7 @@ func (c *Client) GetSessionCountAll(ctx context.Context) []*SessionStats {
 // FetchSessionPage 获取会话列表（支持分页）
 func (c *Client) FetchSessionPage(ctx context.Context, a *auth.RequestAuth, cursor string) ([]SessionInfo, bool, error) {
 	clients := c.requestClientsForAuth(ctx, a)
-	headers := c.authHeaders(a.DeepSeekToken, a.Account.Locale)
+	headers := c.authHeadersForAuth(a)
 
 	// 构建请求 URL
 	params := url.Values{}

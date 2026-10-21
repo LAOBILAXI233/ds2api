@@ -2,9 +2,7 @@ package client
 
 import (
 	"context"
-	"crypto/rand"
 	dsprotocol "ds2api/internal/deepseek/protocol"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
@@ -13,6 +11,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/google/uuid"
 
 	"ds2api/internal/account"
 	"ds2api/internal/auth"
@@ -46,13 +46,23 @@ func (c *Client) Login(ctx context.Context, acc config.Account) (string, error) 
 	} else {
 		return "", errors.New("missing email/mobile")
 	}
-	resp, err := c.postJSON(ctx, clients.regular, clients.fallback, dsprotocol.DeepSeekLoginURL, dsprotocol.LoginHeaders(acc.Locale), payload)
+	loginHeaders := dsprotocol.LoginHeaders(acc.Locale)
+	// The page signs in from /sign_in, and a login POST whose Referer is the
+	// site root describes a request the browser never makes.
+	loginHeaders["Referer"] = dsprotocol.DeepSeekSignInReferer
+	loginHeaders["Origin"] = "https://chat.deepseek.com"
+	// The sign-in request carries the same device identity its payload does.
+	applyDeviceHeaders(loginHeaders, deviceID)
+	resp, err := c.postJSON(ctx, clients.regular, clients.fallback, dsprotocol.DeepSeekLoginURL, loginHeaders, payload)
 	if err != nil {
 		return "", err
 	}
 	code := intFrom(resp["code"])
 	if code != 0 {
-		return "", fmt.Errorf("login failed: %v", resp["msg"])
+		// A top-level code is the envelope's, not the business refusal's: it is
+		// classified so the refresh policy can tell "try again" from "never
+		// again".
+		return "", classifyLoginRefusal(code, asResponseMessage(resp["msg"]))
 	}
 	data, _ := resp["data"].(map[string]any)
 	bizCode := intFrom(data["biz_code"])
@@ -60,15 +70,17 @@ func (c *Client) Login(ctx context.Context, acc config.Account) (string, error) 
 	if bizCode != 0 {
 		if isUserBannedResponse(bizCode, bizMsg) {
 			c.persistBannedAccount(acc.Identifier(), "账户已被停用")
-			return "", fmt.Errorf("login failed: USER_IS_BANNED")
+			return "", auth.NewLoginError(auth.LoginCodeBanned, "USER_IS_BANNED")
 		}
-		return "", fmt.Errorf("login failed: %v", bizMsg)
+		if loginErr := classifyLoginRefusal(bizCode, bizMsg); loginErr != nil {
+			return "", loginErr
+		}
 	}
 	bizData, _ := data["biz_data"].(map[string]any)
 	user, _ := bizData["user"].(map[string]any)
 	token, _ := user["token"].(string)
 	if strings.TrimSpace(token) == "" {
-		return "", errors.New("missing login token")
+		return "", auth.NewLoginError(0, "the sign-in answered without a token")
 	}
 	if chat, _ := user["chat"].(map[string]any); chat != nil {
 		if isMuted, _ := chat["is_muted"].(float64); isMuted == 1 {
@@ -88,11 +100,66 @@ func (c *Client) Login(ctx context.Context, acc config.Account) (string, error) 
 		Account:        acc,
 	}
 	auth.WithAuth(ctx, loginAuth)
+	// The page's post-sign-in sequence: device check, client settings, then the
+	// training switch. The device check is what the server uses to decide
+	// whether this device may keep the token, so it runs before traffic does.
+	c.checkDeviceAfterLogin(ctx, loginAuth)
 	c.reportClientSettingsAfterLogin(ctx, loginAuth, ssoID)
 	if err := c.DisableTrainingAllowed(ctx, loginAuth); err != nil {
 		config.Logger.Warn("[disable_training] failed after login", "account", acc.Identifier(), "error", err)
 	}
+	// Prefetch the risk tokens in the background: a sign-in already cost a
+	// round trip, and the first completion should not wait on two more
+	// requests (the page starts its pollers as soon as it boots).
+	c.scheduleHIFRefresh(ctx, loginAuth, strings.TrimSpace(loginAuth.Account.DeviceID))
 	return token, nil
+}
+
+// checkDeviceAfterLogin runs POST /users/auth_token/check_device. A non-null
+// `rotate` means the server asked for a token rotation; the shape has been seen
+// both as a bare string and as an object carrying `token`, so both are adopted
+// when they parse, and anything else is logged for inspection.
+func (c *Client) checkDeviceAfterLogin(ctx context.Context, a *auth.RequestAuth) {
+	if a == nil || strings.TrimSpace(a.Account.DeviceID) == "" {
+		return
+	}
+	result, err := c.CheckDevice(ctx, a)
+	if err != nil {
+		config.Logger.Debug("[check_device] failed after login", "account", a.AccountID, "error", err)
+		return
+	}
+	if result == nil || result.Rotate == nil {
+		return
+	}
+	if token := rotateTokenValue(result.Rotate); token != "" {
+		if c.Store != nil && strings.TrimSpace(a.AccountID) != "" {
+			if rerr := c.Store.UpdateAccountToken(a.AccountID, token); rerr != nil {
+				config.Logger.Warn("[check_device] persisting rotated token failed", "account", a.AccountID, "error", rerr)
+				return
+			}
+		}
+		a.DeepSeekToken = token
+		a.Account.Token = token
+		config.Logger.Info("[check_device] token rotated as instructed by upstream", "account", a.AccountID)
+		return
+	}
+	config.Logger.Info("[check_device] upstream asked for rotation in an unknown shape", "account", a.AccountID, "rotate", fmt.Sprint(result.Rotate))
+}
+
+// rotateTokenValue pulls a token out of the rotate instruction, if it carries
+// one in a shape this project recognises.
+func rotateTokenValue(rotate any) string {
+	switch v := rotate.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case map[string]any:
+		for _, key := range []string{"token", "new_token", "access_token"} {
+			if token, _ := v[key].(string); strings.TrimSpace(token) != "" {
+				return strings.TrimSpace(token)
+			}
+		}
+	}
+	return ""
 }
 
 func (c *Client) ensureAccountDeviceID(acc config.Account) (string, error) {
@@ -125,12 +192,19 @@ func (c *Client) ensureAccountDeviceID(acc config.Account) (string, error) {
 	return deviceID, nil
 }
 
+// createRandomDeviceID mints the device identity a new account presents: the
+// same value goes into the login payload's device_id and into X-Device-Id on
+// every request that carries one. The browser's device identity is a UUID, and
+// a 36-character UUID-shaped value is what the real client sends, so new
+// accounts get one. Values already stored on existing accounts are left alone:
+// silently re-keying a working account's device is exactly the kind of change
+// that makes upstream re-verify it.
 func createRandomDeviceID() (string, error) {
-	buf := make([]byte, 64)
-	if _, err := rand.Read(buf); err != nil {
+	id, err := uuid.NewRandom()
+	if err != nil {
 		return "", err
 	}
-	return "B" + base64.StdEncoding.EncodeToString(buf), nil
+	return id.String(), nil
 }
 
 func (c *Client) reportClientSettingsAfterLogin(ctx context.Context, a *auth.RequestAuth, ssoID string) {
@@ -301,7 +375,7 @@ func (c *Client) CreateSession(ctx context.Context, a *auth.RequestAuth, maxAtte
 	attempts := 0
 	refreshed := false
 	for attempts < maxAttempts {
-		headers := c.authHeaders(a.DeepSeekToken, a.Account.Locale)
+		headers := c.authHeadersForAuth(a)
 		resp, status, err := c.postJSONWithStatus(ctx, clients.regular, clients.fallback, dsprotocol.DeepSeekCreateSessionURL, headers, map[string]any{})
 		if err != nil {
 			config.Logger.Warn("[create_session] request error", "error", err, "account", a.AccountID)
@@ -362,7 +436,7 @@ func (c *Client) GetPowForTarget(ctx context.Context, a *auth.RequestAuth, targe
 	lastFailureKind := FailureUnknown
 	lastFailureMessage := ""
 	for attempts < maxAttempts {
-		headers := c.authHeaders(a.DeepSeekToken, a.Account.Locale)
+		headers := c.authHeadersForAuth(a)
 		resp, status, err := c.postJSONWithStatus(ctx, clients.regular, clients.fallback, dsprotocol.DeepSeekCreatePowURL, headers, map[string]any{"target_path": targetPath})
 		if err != nil {
 			config.Logger.Warn("[get_pow] request error", "error", err, "account", a.AccountID, "target_path", targetPath)
@@ -428,6 +502,34 @@ func (c *Client) authHeaders(token string, locale string) map[string]string {
 	headers := dsprotocol.BaseHeadersFor(locale)
 	headers["authorization"] = "Bearer " + token
 	return headers
+}
+
+// authHeadersForAuth is authHeaders with the account's own device identity
+// attached. The web client sends X-Device-Id on every API call (and an empty
+// X-Device-Model on the web platform), so a request without them is already a
+// weaker imitation of the page than one with them. The value is the account's
+// stored device id — the same one its login payload carries — so two accounts
+// never present themselves as the same device.
+func (c *Client) authHeadersForAuth(a *auth.RequestAuth) map[string]string {
+	if a == nil {
+		return c.authHeaders("", "")
+	}
+	headers := c.authHeaders(a.DeepSeekToken, a.Account.Locale)
+	applyDeviceHeaders(headers, a.Account.DeviceID)
+	return headers
+}
+
+// applyDeviceHeaders stamps the device identity onto a header set.
+func applyDeviceHeaders(headers map[string]string, deviceID string) {
+	if headers == nil {
+		return
+	}
+	deviceID = strings.TrimSpace(deviceID)
+	if deviceID == "" {
+		return
+	}
+	headers["x-device-id"] = deviceID
+	headers["x-device-model"] = ""
 }
 
 // localeFromContext 尝试从上下文中提取账号 locale，供只有 token 的直通接口使用。
@@ -563,4 +665,31 @@ func normalizeMobileForLogin(raw string) (mobile string, areaCode string) {
 		return digits[2:], "+86"
 	}
 	return digits, "+86"
+}
+
+// classifyLoginRefusal turns an upstream refusal into a LoginError. The codes
+// ds-free-api treats as terminal come back terminal; everything else (an unknown
+// code, a WAF hiccup, a transient 5xx) is retryable.
+func classifyLoginRefusal(code int, message string) *auth.LoginError {
+	text := strings.ToLower(strings.TrimSpace(message))
+	switch {
+	case code == auth.LoginCodeBanned || strings.Contains(text, "user_is_banned"):
+		return auth.NewLoginError(auth.LoginCodeBanned, "USER_IS_BANNED")
+	case code == auth.LoginCodeMuted || strings.Contains(text, "muted") || strings.Contains(text, "limited") || strings.Contains(text, "禁言"):
+		return auth.NewLoginError(auth.LoginCodeMuted, message)
+	case code == auth.LoginCodeCredentials || strings.Contains(text, "password") || strings.Contains(text, "密码"):
+		return auth.NewLoginError(auth.LoginCodeCredentials, message)
+	case code == auth.LoginCodeDevice || strings.Contains(text, "risk_device") || strings.Contains(text, "device") || strings.Contains(text, "设备"):
+		return auth.NewLoginError(auth.LoginCodeDevice, message)
+	}
+	// An unknown code is kept retryable: it is more likely a temporary
+	// envelope (WAF, rate limit) than a permanent refusal.
+	return &auth.LoginError{Code: code, Message: message}
+}
+
+func asResponseMessage(raw any) string {
+	if text, ok := raw.(string); ok {
+		return strings.TrimSpace(text)
+	}
+	return ""
 }

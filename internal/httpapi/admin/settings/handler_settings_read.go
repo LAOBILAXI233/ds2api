@@ -26,6 +26,8 @@ func (h *Handler) getSettings(w http.ResponseWriter, _ *http.Request) {
 			"account_max_queue":            h.Store.RuntimeAccountMaxQueue(recommended),
 			"global_max_inflight":          h.Store.RuntimeGlobalMaxInflight(recommended),
 			"token_refresh_interval_hours": h.Store.RuntimeTokenRefreshIntervalHours(),
+			"hif_tokens":                   hifTokensEnabled(snap),
+			"warm_up_on_startup":           warmUpOnStartup(snap),
 		},
 		"responses":   snap.Responses,
 		"embeddings":  snap.Embeddings,
@@ -50,4 +52,21 @@ func (h *Handler) getSettings(w http.ResponseWriter, _ *http.Request) {
 		"env_backed":        h.Store.IsEnvBacked(),
 		"needs_vercel_sync": needsSync,
 	})
+}
+
+// hifTokensEnabled / warmUpOnStartup read the two runtime switches whose nil
+// value means "on", so the API reports the effective setting rather than a
+// missing field.
+func hifTokensEnabled(snap config.Config) bool {
+	if snap.Runtime.HIFTokens == nil {
+		return true
+	}
+	return *snap.Runtime.HIFTokens
+}
+
+func warmUpOnStartup(snap config.Config) bool {
+	if snap.Runtime.WarmUpOnStartup == nil {
+		return true
+	}
+	return *snap.Runtime.WarmUpOnStartup
 }

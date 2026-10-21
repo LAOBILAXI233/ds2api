@@ -34,6 +34,18 @@ func main() {
 		port = "5001"
 	}
 
+	// Warm the accounts in the background: sign in where a token is missing,
+	// validate the rest, run the device check and prefetch the web client's
+	// risk tokens. This runs beside the listener so boot time is unaffected,
+	// and a cold account no longer pays for it on the caller's first request.
+	app.DS.WarmUpOnStartup()
+
+	// Token sweeper: replaces tokens older than runtime.token_refresh_interval_hours,
+	// validates tokens whose age was never recorded, and retries transient
+	// refresh failures with backoff. An account-level refusal disables the
+	// account instead of being retried.
+	go app.Resolver.StartTokenRefresher(context.Background(), time.Minute)
+
 	srv := &http.Server{
 		Addr:              "0.0.0.0:" + port,
 		Handler:           app.Router,

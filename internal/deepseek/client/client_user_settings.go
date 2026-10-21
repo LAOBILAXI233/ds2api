@@ -22,7 +22,7 @@ func (c *Client) DisableTrainingAllowed(ctx context.Context, a *auth.RequestAuth
 		return nil
 	}
 	clients := c.requestClientsForAuth(ctx, a)
-	headers := c.authHeaders(a.DeepSeekToken, a.Account.Locale)
+	headers := c.authHeadersForAuth(a)
 	payload := map[string]any{
 		"training_allowed": false,
 	}

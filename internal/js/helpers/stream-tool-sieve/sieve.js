@@ -15,6 +15,14 @@ const {
   shouldKeepBareInvokeCapture,
   findPartialXMLToolTagStart,
 } = require('./sieve-xml');
+const {
+  consumeJSONToolCapture,
+  hasOpenJSONToolCall,
+} = require('./sieve-jsoncall');
+const {
+  findJSONToolCallStart,
+  isPartialJSONToolCallPrefix,
+} = require('./parse_payload');
 function processToolSieveChunk(state, chunk, toolNames) {
   if (!state) {
     return [];
@@ -189,7 +197,31 @@ function splitSafeContentForToolDetection(state, s) {
     }
     return ['', text];
   }
+  // A `<tool_call>` marker a delta cut in half is held the same way.
+  const jsonIdx = findPartialJSONToolCallStart(text);
+  if (jsonIdx >= 0 && !insideCodeFenceWithState(state, text.slice(0, jsonIdx))) {
+    if (jsonIdx > 0) {
+      return [text.slice(0, jsonIdx), text.slice(jsonIdx)];
+    }
+    return ['', text];
+  }
   return [text, ''];
+}
+
+function findPartialJSONToolCallStart(text) {
+  const raw = text || '';
+  let lastLT = Math.max(raw.lastIndexOf('<'), raw.lastIndexOf('＜'));
+  if (lastLT < 0) {
+    return -1;
+  }
+  while (lastLT > 0 && raw[lastLT - 1] === '<') {
+    lastLT -= 1;
+  }
+  const tail = raw.slice(lastLT);
+  if (tail.includes('>') || tail.includes('＞')) {
+    return -1;
+  }
+  return isPartialJSONToolCallPrefix(tail) ? lastLT : -1;
 }
 
 const HOLD_TOOL_SEGMENT_START = -2;
@@ -198,6 +230,47 @@ function findToolSegmentStart(state, s) {
   if (!s) {
     return -1;
   }
+  const xmlStart = findXMLToolSegmentStart(state, s);
+  const jsonStart = findJSONToolSegmentStart(state, s);
+  if (xmlStart === HOLD_TOOL_SEGMENT_START || jsonStart === HOLD_TOOL_SEGMENT_START) {
+    return HOLD_TOOL_SEGMENT_START;
+  }
+  if (xmlStart < 0) {
+    return jsonStart;
+  }
+  if (jsonStart < 0) {
+    return xmlStart;
+  }
+  return Math.min(xmlStart, jsonStart);
+}
+
+function findJSONToolSegmentStart(state, s) {
+  let offset = 0;
+  while (true) {
+    const start = findJSONToolCallStart(s, offset);
+    if (!start.ok) {
+      return -1;
+    }
+    if (insideCodeFenceWithState(state, s.slice(0, start.start))) {
+      offset = start.start + 1;
+      continue;
+    }
+    const markdown = markdownCodeSpanStateAt(state, s.slice(0, start.start));
+    if (markdown.ticks === 0) {
+      return start.start;
+    }
+    if (markdownCodeSpanCloses(s.slice(start.start), markdown.ticks)) {
+      offset = start.start + 1;
+      continue;
+    }
+    if (markdown.fromPrior) {
+      return HOLD_TOOL_SEGMENT_START;
+    }
+    return start.start;
+  }
+}
+
+function findXMLToolSegmentStart(state, s) {
   let offset = 0;
   while (true) {
     const tag = findToolMarkupTagOutsideIgnored(s, offset);
@@ -307,8 +380,17 @@ function consumeToolCapture(state, toolNames) {
   if (xmlResult.ready) {
     return xmlResult;
   }
+  // The JSON block form (`<tool_call>{…}</tool_call>`).
+  const jsonResult = consumeJSONToolCapture(captured);
+  if (jsonResult.ready) {
+    return jsonResult;
+  }
   // If XML tags are present but block is incomplete, keep buffering.
   if (hasOpenXMLToolTag(captured)) {
+    return { ready: false, prefix: '', calls: [], suffix: '' };
+  }
+  // Same for a JSON block that has not reached its closing tag yet.
+  if (hasOpenJSONToolCall(captured)) {
     return { ready: false, prefix: '', calls: [], suffix: '' };
   }
   if (shouldKeepBareInvokeCapture(captured)) {

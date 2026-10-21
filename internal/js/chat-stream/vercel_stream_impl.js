@@ -35,6 +35,7 @@ const {
 
 const DEEPSEEK_COMPLETION_URL = 'https://chat.deepseek.com/api/v0/chat/completion';
 const DEEPSEEK_CONTINUE_URL = 'https://chat.deepseek.com/api/v0/chat/continue';
+const DEEPSEEK_RESUME_STREAM_URL = 'https://chat.deepseek.com/api/v0/chat/resume_stream';
 const EMPTY_OUTPUT_RETRY_SUFFIX = 'Previous reply had no visible output. Please regenerate the visible final answer or tool call now.';
 const EMPTY_OUTPUT_RETRY_MAX_ATTEMPTS = 1;
 const AUTO_CONTINUE_MAX_ROUNDS = 8;
@@ -124,14 +125,19 @@ async function handleVercelStream(req, res, rawBody, payload) {
     };
 
     const fetchDeepSeekStream = async (url, bodyPayload, powHeader) => {
+      const streamHeaders = {
+        ...baseHeaders,
+        authorization: `Bearer ${deepseekToken}`,
+      };
+      // An empty header is worse than no header: only send the proof of work
+      // when this round actually has one.
+      if (powHeader) {
+        streamHeaders['x-ds-pow-response'] = powHeader;
+      }
       try {
         return await fetch(url, {
           method: 'POST',
-          headers: {
-            ...baseHeaders,
-            authorization: `Bearer ${deepseekToken}`,
-            'x-ds-pow-response': powHeader,
-          },
+          headers: streamHeaders,
           body: JSON.stringify(bodyPayload),
           signal: upstreamController.signal,
         });
@@ -144,17 +150,18 @@ async function handleVercelStream(req, res, rawBody, payload) {
     };
     const fetchCompletion = (bodyPayload) => fetchDeepSeekStream(DEEPSEEK_COMPLETION_URL, bodyPayload, currentPowHeader);
     let activeDeepSeekSessionID = responseID;
-    const fetchContinue = async (messageID) => {
-      const powHeader = await refreshPowHeader('continue');
-      if (!powHeader) {
-        return null;
-      }
-      return fetchDeepSeekStream(DEEPSEEK_CONTINUE_URL, {
-        chat_session_id: activeDeepSeekSessionID,
-        message_id: messageID,
-        fallback_to_resume: true,
-      }, powHeader);
-    };
+    // Only /chat/completion takes a proof of work: the challenge names its
+    // target_path and the server answers INVALID_TARGET_PATH to a challenge
+    // solved for another path. continue / resume_stream go out without one.
+    const fetchContinue = async (messageID) => fetchDeepSeekStream(DEEPSEEK_CONTINUE_URL, {
+      chat_session_id: activeDeepSeekSessionID,
+      message_id: messageID,
+      fallback_to_resume: true,
+    }, '');
+    const fetchResume = async (messageID) => fetchDeepSeekStream(DEEPSEEK_RESUME_STREAM_URL, {
+      chat_session_id: activeDeepSeekSessionID,
+      message_id: messageID,
+    }, '');
 
     let completionRes = await fetchCompletion(completionPayload);
     if (completionRes === null) {
@@ -391,6 +398,7 @@ async function handleVercelStream(req, res, rawBody, payload) {
                       continue;
                     }
                     thinkingText += trimmed;
+                    continueState.hasContent = true;
                     deltaCoalescer.append('reasoning_content', trimmed);
                   }
                 } else {
@@ -402,6 +410,7 @@ async function handleVercelStream(req, res, rawBody, payload) {
                     continue;
                   }
                   outputText += trimmed;
+                  continueState.hasContent = true;
                   if (!toolSieveEnabled) {
                     deltaCoalescer.append('content', trimmed);
                     continue;
@@ -464,6 +473,18 @@ async function handleVercelStream(req, res, rawBody, payload) {
           continueState = prepareContinueStateForNextRound(continueState);
           currentResponse = nextRes;
           continue;
+        }
+        // An empty but FINISHED reply is re-read once, the way the page does;
+        // a resume that fails falls through to the empty-output handling below.
+        if (shouldResumeStream(continueState)) {
+          continueState.resumed = true;
+          const resumed = await fetchResume(continueState.responseMessageID).catch(() => null);
+          if (resumed && resumed.ok && resumed.body) {
+            continueState = prepareContinueStateForNextRound(continueState);
+            currentResponse = resumed;
+            continue;
+          }
+          console.warn('[vercel_stream] resume_stream unavailable, keeping the empty reply');
         }
         break;
       }
@@ -611,7 +632,14 @@ function createContinueState(sessionID) {
     sessionID: asString(sessionID),
     responseMessageID: 0,
     lastStatus: '',
+    // finalStatus is the reply's own response/status (never quasi_status): an
+    // empty FINISHED reply is what the page repairs through resume_stream.
+    finalStatus: '',
     finished: false,
+    // hasContent records that some reply material reached the client.
+    hasContent: false,
+    // resumed records that the empty reply was already re-read once.
+    resumed: false,
   };
 }
 
@@ -619,6 +647,7 @@ function prepareContinueStateForNextRound(state) {
   return {
     ...state,
     lastStatus: '',
+    finalStatus: '',
     finished: false,
   };
 }
@@ -650,6 +679,9 @@ function observeContinueDirectPatch(state, path, value) {
   switch (asString(path).trim().replace(/^\/+|\/+$/g, '')) {
     case 'response/status':
     case 'status':
+      setContinueStatus(state, asString(value));
+      state.finalStatus = asString(value).trim().toUpperCase();
+      break;
     case 'response/quasi_status':
     case 'quasi_status':
       setContinueStatus(state, asString(value));
@@ -674,6 +706,7 @@ function observeContinueResponseObject(state, response) {
     state.responseMessageID = id;
   }
   setContinueStatus(state, asString(response.status));
+  state.finalStatus = asString(response.status).trim().toUpperCase();
   if (response.auto_continue === true) {
     state.lastStatus = 'AUTO_CONTINUE';
   }
@@ -699,6 +732,9 @@ function observeContinueBatchPatches(state, parentPath, raw) {
     switch (fullPath.replace(/^\/+|\/+$/g, '')) {
       case 'response/status':
       case 'status':
+        setContinueStatus(state, asString(patch.v));
+        state.finalStatus = asString(patch.v).trim().toUpperCase();
+        break;
       case 'response/quasi_status':
       case 'quasi_status':
         setContinueStatus(state, asString(patch.v));
@@ -731,6 +767,18 @@ function shouldAutoContinue(state) {
     return false;
   }
   return ['INCOMPLETE', 'AUTO_CONTINUE'].includes(asString(state.lastStatus).trim().toUpperCase());
+}
+
+// shouldResumeStream reports an empty but FINISHED reply, the case the page
+// re-reads through /chat/resume_stream instead of showing nothing.
+function shouldResumeStream(state) {
+  if (!state || state.resumed || !state.sessionID || state.responseMessageID <= 0) {
+    return false;
+  }
+  if (state.hasContent) {
+    return false;
+  }
+  return asString(state.finalStatus).trim().toUpperCase() === 'FINISHED';
 }
 
 function numberValue(v) {

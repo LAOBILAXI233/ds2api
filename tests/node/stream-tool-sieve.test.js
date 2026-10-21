@@ -1351,3 +1351,60 @@ test('parseToolCalls rejects mismatched markup tags', () => {
   const calls = parseToolCalls(payload, ['read_file']);
   assert.equal(calls.length, 0);
 });
+test('streams a DSML block into a tool call without leaking markup', () => {
+  const chunks = [
+    '结果如下：\n<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name="exec_command">',
+    '\n<｜｜DSML｜｜ parameter name="cmd" string="true">ls -la</｜｜DSML｜｜ parameter>',
+    '\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls> 完成',
+  ];
+  const events = runSieve(chunks, ['exec_command']);
+  const calls = events.filter((evt) => evt.type === 'tool_calls').flatMap((evt) => evt.calls);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].name, 'exec_command');
+  assert.equal(calls[0].input.cmd, 'ls -la');
+  const text = collectText(events);
+  assert.ok(!text.includes('DSML'), `markup leaked: ${text}`);
+  assert.ok(text.includes('结果如下'));
+});
+
+test('streams a wrapper-less DSML invoke block into a tool call', () => {
+  const chunks = [
+    '<｜｜DSML｜｜ invoke name="read_file">',
+    '<｜｜DSML｜｜ parameter name="path">README.md</｜｜DSML｜｜ parameter>',
+    '</｜｜DSML｜｜ invoke>',
+  ];
+  const events = runSieve(chunks, null);
+  const calls = events.filter((evt) => evt.type === 'tool_calls').flatMap((evt) => evt.calls);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].name, 'read_file');
+  assert.equal(collectText(events), '');
+});
+
+test('streams a JSON <tool_call> block split across chunks', () => {
+  const chunks = [
+    '先看一下。\n<tool_ca',
+    'll>{"name":"read_file","arguments":{"path":',
+    '"README.md"}}</tool_call>',
+    '\n然后继续。',
+  ];
+  const events = runSieve(chunks, ['read_file']);
+  const calls = events.filter((evt) => evt.type === 'tool_calls').flatMap((evt) => evt.calls);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].input.path, 'README.md');
+  const text = collectText(events);
+  assert.ok(!text.includes('<tool_call>'), `marker leaked: ${text}`);
+  assert.ok(text.includes('先看一下') && text.includes('然后继续'));
+});
+
+test('keeps a prose <tool_call> mention as text', () => {
+  const events = runSieve(['格式是 <tool_call> 后面接 JSON。\n'], null);
+  const calls = events.filter((evt) => evt.type === 'tool_calls').flatMap((evt) => evt.calls);
+  assert.equal(calls.length, 0);
+  assert.ok(collectText(events).includes('<tool_call>'));
+});
+
+test('keeps a hyphenated tool-calls lookalike as text', () => {
+  const events = runSieve(['<tool-calls><invoke name="Bash"><parameter name="command">pwd</parameter></invoke></tool-calls>'], ['Bash']);
+  const calls = events.filter((evt) => evt.type === 'tool_calls').flatMap((evt) => evt.calls);
+  assert.equal(calls.length, 0);
+});

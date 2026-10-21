@@ -88,7 +88,11 @@
     "account_max_inflight": 2,
     "account_max_queue": 0,
     "global_max_inflight": 0,
-    "token_refresh_interval_hours": 6
+    "token_refresh_interval_hours": 6,
+    "_comment_hif": "是否在 completion/continue/resume 请求上回传网页端风控令牌 x-hif-leim / x-hif-dliq（按账号设备各自缓存，默认开启；DS2API_HIF_TOKENS=0 可关闭做对照）",
+    "hif_tokens": true,
+    "_comment_warm_up": "启动时是否后台预热账号：登录/续期 → 校验令牌 → 设备校验 → 预取风控令牌（默认开启）",
+    "warm_up_on_startup": true
   },
   "auto_delete": {
     "mode": "none"

@@ -14,6 +14,9 @@ type Handler struct {
 	DS          adminshared.DeepSeekCaller
 	OpenAI      adminshared.OpenAIChatCaller
 	ChatHistory *chathistory.Store
+	// Auth is the token resolver. It is optional (some tests build a handler
+	// without one) and is only used by the manual re-login endpoint.
+	Auth any
 }
 
 var writeJSON = adminshared.WriteJSON

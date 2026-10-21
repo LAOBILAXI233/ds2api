@@ -73,7 +73,7 @@ func NewApp() (*App, error) {
 	geminiHandler := &gemini.Handler{Store: store, Auth: resolver, DS: dsClient, OpenAI: chatHandler, ChatHistory: chatHistoryStore}
 	ollamaHandler := &ollama.Handler{Store: store}
 	webuiHandler := webui.NewHandler()
-	adminHandler := &admin.Handler{Store: store, Pool: pool, DS: dsClient, OpenAI: chatHandler, ChatHistory: chatHistoryStore, WebUIFallback: webuiHandler.HandleAdminFallback}
+	adminHandler := &admin.Handler{Store: store, Pool: pool, DS: dsClient, OpenAI: chatHandler, ChatHistory: chatHistoryStore, Auth: resolver, WebUIFallback: webuiHandler.HandleAdminFallback}
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)

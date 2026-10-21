@@ -37,6 +37,7 @@ func NormalizeOpenAIChatRequest(store ConfigReader, req map[string]any, traceID 
 	toolNames = ensureToolDetectionEnabled(toolNames, req["tools"])
 	passThrough := collectOpenAIChatPassThrough(req)
 	refFileIDs := CollectOpenAIRefFileIDs(req)
+	thinkingEnabled = applyAttachmentThinkingRule(thinkingEnabled, refFileIDs)
 
 	return StandardRequest{
 		Surface:         "openai_chat",
@@ -89,6 +90,7 @@ func NormalizeOpenAIResponsesRequest(store ConfigReader, req map[string]any, tra
 	}
 	passThrough := collectOpenAIChatPassThrough(req)
 	refFileIDs := CollectOpenAIRefFileIDs(req)
+	thinkingEnabled = applyAttachmentThinkingRule(thinkingEnabled, refFileIDs)
 
 	return StandardRequest{
 		Surface:         "openai_responses",
@@ -122,6 +124,27 @@ func ensureToolDetectionEnabled(toolNames []string, toolsRaw any) []string {
 	// are malformed or lack explicit names; parsed tool payload names are no
 	// longer filtered by this list.
 	return []string{"__any_tool__"}
+}
+
+// applyAttachmentThinkingRule applies the web client's own server rule: a turn
+// that carries file references runs with thinking off. The page switches its
+// model_type to default and thinking_enabled to false for such a turn, and the
+// server refuses the combination, so a request that would have sent both is
+// lowered to the shape the client itself uses.
+//
+// Only client-supplied references are considered here: the history file the
+// split-context feature uploads for a very long conversation is a synthetic
+// text attachment that this project has always sent alongside thinking, and
+// silently disabling reasoning for exactly the long prompts that need it are a
+// worse trade than keeping that path as it was.
+func applyAttachmentThinkingRule(thinkingEnabled bool, refFileIDs []string) bool {
+	if !thinkingEnabled {
+		return false
+	}
+	if len(refFileIDs) == 0 {
+		return true
+	}
+	return false
 }
 
 func collectOpenAIChatPassThrough(req map[string]any) map[string]any {

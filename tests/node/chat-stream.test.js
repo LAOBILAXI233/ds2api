@@ -163,6 +163,11 @@ async function runMockVercelStreamSequence(upstreamSequences, prepareOverrides =
       continueCalls += 1;
       return sseResponse(upstreamSequences[idx]);
     }
+    if (textURL.includes('/resume_stream')) {
+      const idx = Math.min(continueCalls + 1, upstreamSequences.length - 1);
+      continueCalls += 1;
+      return sseResponse(upstreamSequences[idx]);
+    }
     const idx = Math.min(completionCalls, upstreamSequences.length - 1);
     completionCalls += 1;
     return sseResponse(upstreamSequences[idx]);
@@ -340,7 +345,9 @@ test('vercel stream exhausts DeepSeek continue before synthetic retry', async ()
   const parsed = frames.filter((frame) => frame !== '[DONE]').map((frame) => JSON.parse(frame));
   assert.equal(fetchURLs.filter((url) => url === 'https://chat.deepseek.com/api/v0/chat/completion').length, 1);
   assert.equal(fetchURLs.filter((url) => url === 'https://chat.deepseek.com/api/v0/chat/continue').length, 1);
-  assert.equal(fetchURLs.filter((url) => url.includes('__stream_pow=1')).length, 1);
+  // continue carries no proof of work: the challenge names /chat/completion and
+  // the server answers INVALID_TARGET_PATH to a challenge for another path.
+  assert.equal(fetchURLs.filter((url) => url.includes('__stream_pow=1')).length, 0);
   assert.equal(parsed[0].choices[0].delta.content, 'continued');
   assert.equal(parsed[1].choices[0].finish_reason, 'stop');
   assert.equal(fetchBodies.some((body) => String(body.prompt || '').includes('Previous reply had no visible output')), false);
@@ -1104,4 +1111,36 @@ test('vercel stream does not consume SSE body during mute detection', async () =
   } finally {
     global.fetch = originalFetch;
   }
+});
+test('vercel stream re-reads an empty finished reply through resume_stream', async () => {
+  const { frames, fetchURLs, fetchBodies } = await runMockVercelStreamSequence([
+    ['data: {"response_message_id":7,"p":"response/status","v":"FINISHED"}\n\n', 'data: [DONE]\n\n'],
+    [
+      'data: {"p":"response/content","v":"resumed answer"}\n\n',
+      'data: {"p":"response/status","v":"FINISHED"}\n\n',
+      'data: [DONE]\n\n',
+    ],
+  ]);
+  const parsed = frames.filter((frame) => frame !== '[DONE]').map((frame) => JSON.parse(frame));
+  assert.equal(fetchURLs.filter((url) => url === 'https://chat.deepseek.com/api/v0/chat/resume_stream').length, 1);
+  assert.equal(fetchURLs.filter((url) => url === 'https://chat.deepseek.com/api/v0/chat/continue').length, 0);
+  // resume_stream carries no proof of work either.
+  assert.equal(fetchURLs.filter((url) => url.includes('__stream_pow=1')).length, 0);
+  assert.equal(parsed[0].choices[0].delta.content, 'resumed answer');
+  assert.equal(parsed.at(-1).choices[0].finish_reason, 'stop');
+  assert.equal(fetchBodies.some((body) => String(body.prompt || '').includes('Previous reply had no visible output')), false);
+});
+
+test('vercel stream does not re-read a reply that only thought', async () => {
+  // A reply that only thought is not empty, so it is never re-read; it still
+  // goes through the empty-output handling below (thinking without visible
+  // output defers, like the Go runtime).
+  const { fetchURLs } = await runMockVercelStreamSequence([
+    [
+      'data: {"response_message_id":7,"p":"response/thinking_content","v":"pondering"}\n\n',
+      'data: {"p":"response/status","v":"FINISHED"}\n\n',
+      'data: [DONE]\n\n',
+    ],
+  ], { thinking_enabled: true });
+  assert.equal(fetchURLs.filter((url) => url.includes('/resume_stream')).length, 0);
 });

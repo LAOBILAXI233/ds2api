@@ -10,12 +10,21 @@ type toolMarkupNameAlias struct {
 	raw       string
 	canonical string
 	epseOnly  bool
+	// shellOnly marks an alias that is only a tool tag when the shell around it
+	// names DSML (`<｜｜DSML｜｜ calls>`). Without that check `<tool-calls>` — a
+	// lookalike the parser has always refused — would start parsing.
+	shellOnly bool
 }
 
 var toolMarkupNames = []toolMarkupNameAlias{
 	{raw: "tool_calls", canonical: "tool_calls"},
 	{raw: "tool-calls", canonical: "tool_calls", epseOnly: true},
 	{raw: "toolcalls", canonical: "tool_calls", epseOnly: true},
+	// The web client's own agent format wraps calls in
+	// `<｜｜DSML｜｜ calls>` … `</｜｜DSML｜｜ calls>`; the wrapper's local name is
+	// "calls", not "tool_calls". Only the shelled form is accepted, so neither a
+	// plain `<calls>` in prose nor a `<tool-calls>` lookalike becomes a tag.
+	{raw: "calls", canonical: "tool_calls", epseOnly: true, shellOnly: true},
 	{raw: "invoke", canonical: "invoke"},
 	{raw: "parameter", canonical: "parameter"},
 }
@@ -167,7 +176,7 @@ func scanToolMarkupTagAt(text string, start int) (ToolMarkupTag, bool) {
 	}
 	prefixStart := i
 	i, epseLike := consumeToolMarkupNamePrefix(text, i)
-	name, nameLen := matchToolMarkupName(text, i, epseLike)
+	name, nameLen := matchToolMarkupName(text, prefixStart, i, epseLike)
 	if nameLen == 0 {
 		fallbackName, fallbackStart, fallbackLen, ok := matchToolMarkupNameAfterArbitraryPrefix(text, prefixStart)
 		if !ok {
@@ -352,6 +361,12 @@ func hasASCIIPartialPrefixFoldAt(text string, start int, prefix string) bool {
 
 func hasToolMarkupNamePrefix(text string, start int) bool {
 	for _, name := range toolMarkupNames {
+		// A shell-only alias must not make an arbitrary prefix look like a tag
+		// shell: `<tool_calls>` has to keep parsing as the canonical wrapper, not
+		// as a prefixed one landing on "calls".
+		if name.shellOnly {
+			continue
+		}
 		if hasASCIIPrefixFoldAt(text, start, name.raw) {
 			return true
 		}
@@ -362,9 +377,12 @@ func hasToolMarkupNamePrefix(text string, start int) bool {
 	return false
 }
 
-func matchToolMarkupName(text string, start int, epseLike bool) (string, int) {
+func matchToolMarkupName(text string, prefixStart int, start int, epseLike bool) (string, int) {
 	for _, name := range toolMarkupNames {
 		if name.epseOnly && !epseLike {
+			continue
+		}
+		if name.shellOnly && !prefixCarriesDSMLMarker(text[prefixStart:start]) {
 			continue
 		}
 		if next, ok := consumeToolKeyword(text, start, name.raw); ok {
@@ -382,6 +400,9 @@ func matchToolMarkupNameAfterArbitraryPrefix(text string, start int) (string, in
 		for _, name := range toolMarkupNames {
 			next, ok := consumeToolKeyword(text, idx, name.raw)
 			if !ok {
+				continue
+			}
+			if name.shellOnly && !prefixCarriesDSMLMarker(text[start:idx]) {
 				continue
 			}
 			if !toolMarkupPrefixAllowsLocalNameAt(text, start, idx) {
@@ -404,6 +425,11 @@ func hasPartialToolMarkupNameAfterArbitraryPrefix(text string, start int) bool {
 			return false
 		}
 		if toolMarkupPrefixAllowsLocalNameAt(text, start, idx) && hasToolMarkupNamePrefix(text, idx) {
+			return true
+		}
+		// A split `<｜｜DSML｜｜ cal` still has to be held rather than streamed:
+		// the shell-only "calls" alias is not part of the generic name list.
+		if toolMarkupPrefixAllowsLocalNameAt(text, start, idx) && prefixCarriesDSMLMarker(text[start:idx]) && isPartialCallsName(text[idx:]) {
 			return true
 		}
 		if toolMarkupPrefixAllowsLocalNameAt(text, start, idx) && hasEPSENamePrefixOrPartial(text, idx) {
@@ -581,4 +607,21 @@ func toolMarkupPrefixContainsSlash(prefix string) bool {
 		}
 	}
 	return false
+}
+
+// prefixCarriesDSMLMarker reports whether the text between a tag opener and its
+// local name names DSML (ignoring separators, fullwidth spellings and case), so
+// the "calls" wrapper is only recognised in the web client's own markup.
+func prefixCarriesDSMLMarker(prefix string) bool {
+	return strings.Contains(normalizedASCIILowerString(prefix), "dsml")
+}
+
+// isPartialCallsName reports whether text is a non-empty proper prefix of the
+// DSML wrapper's local name ("calls").
+func isPartialCallsName(text string) bool {
+	lower := normalizedASCIILowerString(text)
+	if lower == "" || len(lower) >= len("calls") {
+		return false
+	}
+	return strings.HasPrefix("calls", lower)
 }

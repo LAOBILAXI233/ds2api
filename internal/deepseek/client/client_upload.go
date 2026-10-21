@@ -84,14 +84,17 @@ func (c *Client) UploadFile(ctx context.Context, a *auth.RequestAuth, req Upload
 			}
 			clients = c.requestClientsForAuth(ctx, a)
 		}
-		headers := c.authHeaders(a.DeepSeekToken, a.Account.Locale)
+		headers := c.authHeadersForAuth(a)
 		headers["Content-Type"] = contentTypeHeader
 		if modelType != "" {
 			headers["x-model-type"] = modelType
 		}
 		headers["x-ds-pow-response"] = powHeader
 		headers["x-file-size"] = strconv.Itoa(len(req.Data))
-		headers["x-thinking-enabled"] = "1"
+		// The page uploads with thinking off: an attachment turn is a
+		// non-thinking turn (see the attachment/thinking rule), and the
+		// header describes the turn the file is being uploaded for.
+		headers["x-thinking-enabled"] = "0"
 		resp, err := c.doUpload(ctx, clients.regular, clients.fallback, dsprotocol.DeepSeekUploadFileURL, headers, body)
 		if err != nil {
 			config.Logger.Warn("[upload_file] request error", "error", err, "account", a.AccountID, "filename", filename)

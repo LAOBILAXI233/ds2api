@@ -40,22 +40,33 @@ type RequestAuth struct {
 type LoginFunc func(ctx context.Context, acc config.Account) (string, error)
 type PostLoginFunc func(ctx context.Context, a *RequestAuth)
 
+// TokenValidator checks a stored token without signing in. A nil error means the
+// token is a live session.
+type TokenValidator func(ctx context.Context, acc config.Account, token string) error
+
 type Resolver struct {
 	Store     *config.Store
 	Pool      *account.Pool
 	Login     LoginFunc
 	PostLogin PostLoginFunc
+	// Validate asks whether a stored token is still a live session without
+	// signing in. The DeepSeek client installs it (GET /users/current); a nil
+	// validator means the sweeper only learns a token's state by signing in.
+	Validate TokenValidator
 
-	mu               sync.Mutex
-	tokenRefreshedAt map[string]time.Time
+	// refreshMu guards refreshGates: one gate per account makes token refresh
+	// single-flight, so a burst of requests with a revoked token produces one
+	// sign-in rather than one per request.
+	refreshMu    sync.Mutex
+	refreshGates map[string]*refreshGate
 }
 
 func NewResolver(store *config.Store, pool *account.Pool, login LoginFunc) *Resolver {
 	return &Resolver{
-		Store:            store,
-		Pool:             pool,
-		Login:            login,
-		tokenRefreshedAt: map[string]time.Time{},
+		Store:        store,
+		Pool:         pool,
+		Login:        login,
+		refreshGates: map[string]*refreshGate{},
 	}
 }
 
@@ -194,9 +205,12 @@ func (r *Resolver) loginAndPersist(ctx context.Context, a *RequestAuth) error {
 		return err
 	}
 	a.Account.Token = token
+	a.Account.TokenRefreshedAt = float64(time.Now().Unix())
+	a.Account.RefreshFailures = 0
+	a.Account.RefreshError = ""
+	a.Account.RefreshRetryAt = 0
 	a.DeepSeekToken = token
-	r.markTokenRefreshedNow(a.AccountID)
-	if err := r.Store.UpdateAccountToken(a.AccountID, token); err != nil {
+	if err := r.Store.MarkAccountRefreshed(a.AccountID, token); err != nil {
 		return err
 	}
 	if r.PostLogin != nil {
@@ -205,13 +219,15 @@ func (r *Resolver) loginAndPersist(ctx context.Context, a *RequestAuth) error {
 	return nil
 }
 
+// RefreshToken replaces a token upstream refused. Unlike the old path it does
+// not wipe the stored token first: the refresh is single-flight, so every
+// waiting request re-reads the account afterwards and picks up whichever token
+// the winning goroutine obtained.
 func (r *Resolver) RefreshToken(ctx context.Context, a *RequestAuth) bool {
-	if !a.UseConfigToken || a.AccountID == "" {
+	if a == nil || !a.UseConfigToken || a.AccountID == "" {
 		return false
 	}
-	_ = r.Store.UpdateAccountToken(a.AccountID, "")
-	a.Account.Token = ""
-	if err := r.loginAndPersist(ctx, a); err != nil {
+	if err := r.refreshAccountToken(ctx, a, refreshReasonRequest); err != nil {
 		config.Logger.Error("[refresh_token] failed", "account", a.AccountID, "error", err)
 		return false
 	}
@@ -223,8 +239,8 @@ func (r *Resolver) MarkTokenInvalid(a *RequestAuth) {
 		return
 	}
 	a.Account.Token = ""
+	a.Account.TokenRefreshedAt = 0
 	a.DeepSeekToken = ""
-	r.clearTokenRefreshMark(a.AccountID)
 	_ = r.Store.UpdateAccountToken(a.AccountID, "")
 }
 
@@ -377,55 +393,29 @@ func callerTokenID(token string) string {
 }
 
 func (r *Resolver) ensureManagedToken(ctx context.Context, a *RequestAuth) error {
-	if strings.TrimSpace(a.Account.Token) == "" {
-		return r.loginAndPersist(ctx, a)
+	// The store is the source of truth for a token's age: the pool hands out
+	// snapshots, and a snapshot taken before the last refresh would make the
+	// account look newer (or older) than it is.
+	if fresh, ok := r.Store.FindAccount(a.AccountID); ok {
+		a.Account = fresh
 	}
-	if r.shouldForceRefresh(a.AccountID) {
-		if err := r.loginAndPersist(ctx, a); err != nil {
-			return err
+	token := strings.TrimSpace(a.Account.Token)
+	if token == "" {
+		return r.refreshAccountToken(ctx, a, refreshReasonRequest)
+	}
+	if r.tokenNeedsRefresh(a.Account, false) {
+		if err := r.refreshAccountToken(ctx, a, refreshReasonRequest); err != nil {
+			// A refresh that just failed transiently must not fail the request:
+			// the stored token may still work. Only a terminal refusal (handled
+			// inside the refresh) means there is nothing to serve from.
+			if IsTerminalLoginError(err) {
+				return err
+			}
+			a.DeepSeekToken = token
+			return nil
 		}
 		return nil
 	}
-	a.DeepSeekToken = a.Account.Token
+	a.DeepSeekToken = token
 	return nil
-}
-
-func (r *Resolver) shouldForceRefresh(accountID string) bool {
-	if r == nil || r.Store == nil {
-		return false
-	}
-	if strings.TrimSpace(accountID) == "" {
-		return false
-	}
-	intervalHours := r.Store.RuntimeTokenRefreshIntervalHours()
-	if intervalHours <= 0 {
-		return false
-	}
-	now := time.Now()
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	last, ok := r.tokenRefreshedAt[accountID]
-	if !ok || last.IsZero() {
-		r.tokenRefreshedAt[accountID] = now
-		return false
-	}
-	return now.Sub(last) >= time.Duration(intervalHours)*time.Hour
-}
-
-func (r *Resolver) markTokenRefreshedNow(accountID string) {
-	if strings.TrimSpace(accountID) == "" {
-		return
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.tokenRefreshedAt[accountID] = time.Now()
-}
-
-func (r *Resolver) clearTokenRefreshMark(accountID string) {
-	if strings.TrimSpace(accountID) == "" {
-		return
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	delete(r.tokenRefreshedAt, accountID)
 }

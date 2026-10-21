@@ -1,6 +1,7 @@
 package client
 
 import (
+	"github.com/google/uuid"
 	"testing"
 	"time"
 )
@@ -110,8 +111,8 @@ func TestCreateRandomDeviceID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("createRandomDeviceID failed: %v", err)
 	}
-	if len(id1) < 2 || id1[0] != 'B' {
-		t.Fatalf("expected device id to start with B, got %q", id1)
+	if _, err := uuid.Parse(id1); err != nil {
+		t.Fatalf("expected a UUID-shaped device id, got %q: %v", id1, err)
 	}
 	id2, err := createRandomDeviceID()
 	if err != nil {

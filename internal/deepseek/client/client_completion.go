@@ -18,8 +18,11 @@ import (
 func (c *Client) CallCompletion(ctx context.Context, a *auth.RequestAuth, payload map[string]any, powResp string, maxAttempts int) (*http.Response, error) {
 	_ = maxAttempts
 	clients := c.requestClientsForAuth(ctx, a)
-	headers := c.authHeaders(a.DeepSeekToken, a.Account.Locale)
+	headers := c.authHeadersForAuth(a)
 	headers["x-ds-pow-response"] = powResp
+	// The page's own SSE header provider stamps the two risk tokens onto the
+	// generation request only; they are fetched (and cached per device) here.
+	c.applyHIFHeaders(ctx, a, headers)
 	applySessionReferer(headers, payload)
 	captureSession := c.capture.Start("deepseek_completion", dsprotocol.DeepSeekCompletionURL, a.AccountID, payload)
 	resp, err := c.streamPostOnce(ctx, clients.stream, dsprotocol.DeepSeekCompletionURL, headers, payload)

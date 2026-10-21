@@ -72,6 +72,21 @@ func parseToolCallsDetailedXMLOnly(text string) ToolCallParseResult {
 		}
 	}
 	if len(parsed) == 0 {
+		// A DSML block that arrived without the `<tool_calls>` wrapper: the
+		// model's own agent format does not always carry one.
+		if dsmlCalls := ParseDSMLToolCalls(trimmed, nil); len(dsmlCalls) > 0 {
+			parsed = dsmlCalls
+			result.SawToolCallSyntax = true
+		}
+	}
+	if len(parsed) == 0 {
+		// `<tool_call>{"name":…}</tool_call>` — an unambiguous JSON call.
+		if jsonCalls := ParseJSONToolCallBlocks(trimmed); len(jsonCalls) > 0 {
+			parsed = jsonCalls
+			result.SawToolCallSyntax = true
+		}
+	}
+	if len(parsed) == 0 {
 		return result
 	}
 

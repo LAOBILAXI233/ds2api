@@ -25,6 +25,9 @@ type Handler struct {
 	DS          adminshared.DeepSeekCaller
 	OpenAI      adminshared.OpenAIChatCaller
 	ChatHistory *chathistory.Store
+	// Auth is the token resolver (manual re-login). Optional: only the accounts
+	// sub-handler uses it, and a nil value simply disables that endpoint.
+	Auth any
 	// WebUIFallback is forwarded to the auth sub-handler so its RequireAdmin
 	// middleware can serve the SPA index.html when a browser navigation request
 	// (GET, no Authorization, Accept: text/html) hits a protected admin API
@@ -35,7 +38,7 @@ type Handler struct {
 func RegisterRoutes(r chi.Router, h *Handler) {
 	deps := adminsharedDeps(h)
 	authHandler := &adminauth.Handler{Store: deps.Store, Pool: deps.Pool, DS: deps.DS, OpenAI: deps.OpenAI, ChatHistory: deps.ChatHistory, WebUIFallback: h.WebUIFallback}
-	accountsHandler := &adminaccounts.Handler{Store: deps.Store, Pool: deps.Pool, DS: deps.DS, OpenAI: deps.OpenAI, ChatHistory: deps.ChatHistory}
+	accountsHandler := &adminaccounts.Handler{Store: deps.Store, Pool: deps.Pool, DS: deps.DS, OpenAI: deps.OpenAI, ChatHistory: deps.ChatHistory, Auth: h.Auth}
 	configHandler := &adminconfig.Handler{Store: deps.Store, Pool: deps.Pool, DS: deps.DS, OpenAI: deps.OpenAI, ChatHistory: deps.ChatHistory}
 	settingsHandler := &adminsettings.Handler{Store: deps.Store, Pool: deps.Pool, DS: deps.DS, OpenAI: deps.OpenAI, ChatHistory: deps.ChatHistory}
 	proxiesHandler := &adminproxies.Handler{Store: deps.Store, Pool: deps.Pool, DS: deps.DS, OpenAI: deps.OpenAI, ChatHistory: deps.ChatHistory}

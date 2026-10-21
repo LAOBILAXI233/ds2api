@@ -12,6 +12,8 @@ import (
 func RegisterRoutes(r chi.Router, h *Handler) {
 	r.Get("/accounts", h.listAccounts)
 	r.Post("/accounts", h.addAccount)
+	r.Post("/accounts/import-token", h.importAccountToken)
+	r.Post("/accounts/{identifier}/relogin", h.reloginAccount)
 	r.Put("/accounts/{identifier}", h.updateAccount)
 	r.Delete("/accounts/{identifier}", h.deleteAccount)
 	r.Put("/accounts/{identifier}/enabled", h.toggleAccountEnabled)

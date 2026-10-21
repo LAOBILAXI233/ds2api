@@ -108,6 +108,9 @@ DS2API 当前的核心思路，不是把客户端传来的 `messages`、`tools`�
 - `prompt` 才是对话上下文主载体。
 - `ref_file_ids` 只承载文件引用，不承载普通文本消息。
 - `tools` 不会作为“原生工具 schema”直接下发给下游，而是被改写进 `prompt`。
+- `thinking_enabled` 与 `ref_file_ids` 互斥：网页端对“带附件的轮次”关闭思考，因此请求里由客户端带来的 `ref_file_ids`（`input_file` / 内联文件 / 图片 / 顶层 `ref_file_ids`）会让该轮 `thinking_enabled` 降为 `false`，上传接口同时携带 `x-thinking-enabled: 0`。由 `current_input_file` 拆分出的历史文件（`DS2API_HISTORY.txt` / `DS2API_TOOLS.txt`）不在此列：那是本项目自造的文本附件，长上下文恰恰最需要思考，因此保持原开关不变。实现见 `promptcompat.applyAttachmentThinkingRule`。
+- PoW 只用于 `/api/v0/chat/completion`：挑战里的 `target_path` 与请求路径不匹配会被上游判 `INVALID_TARGET_PATH`，所以 `/api/v0/chat/continue` 与 `/api/v0/chat/resume_stream` 按网页端行为**不带** `x-ds-pow-response`。
+- 上游 `FINISHED` 但整轮没有任何正文 / 思考 / 工具调用时，先按网页端行为调 `/api/v0/chat/resume_stream`（`{chat_session_id, message_id}`）重读该消息一次，仍为空才进入下面的空输出补偿重试；`INCOMPLETE` / `AUTO_CONTINUE` 则走 `/api/v0/chat/continue`。这两条续接在客户端响应体层面拼接，只向客户端发一个 `[DONE]`，思考内容按 overlap 去重。
 - 对外返回给客户端的 `prompt_tokens` / `input_tokens` / `promptTokenCount` 不再按“最后一条消息”或字符粗估近似返回，而是基于**完整上下文 prompt**做 tokenizer 计数；为了避免上下文实际超限但客户端误以为还能塞下，请求侧上下文 token 会额外保守上浮一点，宁可略大也不低估。
 - 当前 `/v1/chat/completions` 业务路径仍是“每次请求新建一个远端 `chat_session_id`，并默认发送 `parent_message_id: null`”；因此 DS2API 对外默认表现为“新会话 + prompt 拼历史”，而不是复用 DeepSeek 原生会话树。
 - 但 DeepSeek 远端本身支持同一 `chat_session_id` 的跨轮次持续对话。2026-04-27 已用项目内现有 DeepSeek client 做过一次不改业务代码的双轮实测：同一 `chat_session_id` 下，第 1 轮返回 `request_message_id=1` / `response_message_id=2` / 文本 `SESSION_TEST_ONE`；第 2 轮重新获取一次 PoW，并发送 `parent_message_id=2` 后，成功返回 `request_message_id=3` / `response_message_id=4` / 文本 `SESSION_TEST_TWO`。这说明“同远端会话持续聊天”能力存在，且每轮需要携带正确的 parent/message 链接信息，同时重新获取对应轮次可用的 PoW。
@@ -175,8 +178,24 @@ Go 侧读取 DeepSeek SSE 时不再依赖 `bufio.Scanner` 的固定 2MiB 单行�
 工具提示词也会明确要求模型按本次调用实际需要填写参数，禁止输出 placeholder、空字符串或纯空白参数；如果必填参数未知，应先追问用户或正常文字回复，而不是输出空工具壳。对 `Bash` / `execute_command` 这类 shell 工具，命令或脚本必须写入 `command` 参数。解析层仍会把空字符串参数结构化返回；是否拒绝空 `command` 由后续工具执行侧 / 客户端 schema 校验决定。
 如果当前请求声明了 `Read` / `read_file` 这类读取工具，兼容层会额外注入一条 read-tool cache guard：当读取结果只表示“文件未变更 / 已在历史中 / 请引用先前上下文 / 没有正文内容”时，模型必须把它视为内容不可用，不能反复调用同一个无正文读取；应改为请求完整正文读取能力，或向用户说明需要重新提供文件内容。这个约束只缓解客户端缓存返回空内容导致的死循环，DS2API 不会也无法凭空恢复客户端本地文件正文。
 
-### 6.1 按 API Key 控制工具注入
+### 6.0 解析层接受的四种调用格式
 
+提示词只教一种格式（EPSE 外壳 + 内部 XML 语义），但解析层接受模型实际会写出的四种形态。四者的判定在 Go 主路径（`internal/toolcall` + `internal/toolstream`）与 Vercel Node 路径（`internal/js/helpers/stream-tool-sieve`）保持同一套语义，并由 `tests/node/stream-tool-sieve.test.js` 与 Go 单测分别覆盖：
+
+| 形态 | 例子 | 处理 |
+| --- | --- | --- |
+| EPSE 外壳 | `<\|EPSE\|tool_calls>` / `<\|EPSE\|invoke>` / `<\|EPSE\|parameter>` | 首选，按 XML 语义解析，兼容各类分隔符漂移 |
+| canonical XML | `<tool_calls>` / `<invoke>` / `<parameter>` | 旧式但等价，同样解析 |
+| 网页端 DSML | `<｜｜DSML｜｜ calls>` / `<｜｜DSML｜｜ invoke name="…">` / `<｜｜DSML｜｜ parameter name="…">` | 与 EPSE 同等对待；**带 `calls` 外壳或不带外壳（裸 invoke 块）都识别**。包装名只有出现 DSML 外壳时才算 `tool_calls`，因此 `<calls>` / `<tool-calls>` 仍按文本处理 |
+| JSON 块 | `<tool_call>{"name":"…","arguments":{…}}</tool_call>` | 块体可解析为 `name` + `arguments` / `parameters` / `input`（或此类对象数组）时识别为调用；不含 JSON 的旧式 `<tool_call><tool_name>…` 仍是文本 |
+
+细节：
+
+- DSML 的参数体通常不是 CDATA 而是纯文本，`string="true"` 这类属性会被忽略，值按 JSON / 纯文本规则还原；参数数量与名字只取 `name` 属性。
+- 流式筛（sieve）只在**识别到标记**处开始缓冲：`<tool_call>` 必须紧跟 `{` 或 `[` 才算起点，所以正文里提到 `<tool_call>` 不会被扣住，也不会影响首字延迟。
+- 因为筛层识别 DSML 外壳，上游一旦开始输出 `<｜｜DSML｜｜ calls>` 就不会把标记本身漏进正文；解析失败的块整体折入 `reasoning_content`。
+
+### 6.1 按 API Key 控制工具注入
 每个托管 API Key 可以单独配置 `tools_enabled` 开关（默认关闭）。当某把 Key 的 `tools_enabled=false` 时，使用该 Key 发起的请求无论是否携带 `tools` 定义，兼容层都会在标准化之前清空 `tools` / `tool_choice` 字段，使得：
 
 - 工具描述（`You have access to these tools:` 大段文本）不会被注入 system prompt

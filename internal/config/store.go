@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 )
 
 type Store struct {
@@ -224,6 +225,55 @@ func (s *Store) UpdateAccountToken(identifier, token string) error {
 	if newID != "" {
 		s.accMap[newID] = idx
 	}
+	return s.saveLocked()
+}
+
+// MarkAccountRefreshed records a successful sign-in: the new token, when it was
+// obtained, and a clean failure slate. Keeping the timestamp here (rather than
+// in a process-local map) is what lets a restart know how old a token is
+// without signing in again.
+func (s *Store) MarkAccountRefreshed(identifier, token string) error {
+	identifier = strings.TrimSpace(identifier)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	idx, ok := s.findAccountIndexLocked(identifier)
+	if !ok {
+		return errors.New("account not found")
+	}
+	acc := &s.cfg.Accounts[idx]
+	oldID := acc.Identifier()
+	acc.Token = token
+	acc.TokenRefreshedAt = float64(time.Now().Unix())
+	acc.RefreshFailures = 0
+	acc.RefreshError = ""
+	acc.RefreshRetryAt = 0
+	newID := acc.Identifier()
+	if identifier != "" {
+		s.accMap[identifier] = idx
+	}
+	if oldID != "" {
+		s.accMap[oldID] = idx
+	}
+	if newID != "" {
+		s.accMap[newID] = idx
+	}
+	return s.saveLocked()
+}
+
+// MarkAccountRefreshFailure records a transient refresh failure and the delay
+// before the next attempt.
+func (s *Store) MarkAccountRefreshFailure(identifier, reason string, failures int, retryAt float64) error {
+	identifier = strings.TrimSpace(identifier)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	idx, ok := s.findAccountIndexLocked(identifier)
+	if !ok {
+		return errors.New("account not found")
+	}
+	acc := &s.cfg.Accounts[idx]
+	acc.RefreshFailures = failures
+	acc.RefreshError = strings.TrimSpace(reason)
+	acc.RefreshRetryAt = retryAt
 	return s.saveLocked()
 }
 

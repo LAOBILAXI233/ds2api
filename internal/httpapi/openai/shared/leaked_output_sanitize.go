@@ -59,8 +59,44 @@ func sanitizeLeakedOutput(text string) string {
 	out = leakedThoughtMarkerPattern.ReplaceAllString(out, "")
 	out = leakedMetaMarkerPattern.ReplaceAllString(out, "")
 	out = stripLeakedToolCallWrapperBlocks(out)
+	out = stripLeakedJSONToolCallBlocks(out)
 	out = sanitizeLeakedAgentXMLBlocks(out)
 	return out
+}
+
+// stripLeakedJSONToolCallBlocks removes `<tool_call>{…}</tool_call>` elements
+// whose body really is a call. A block that only mentions the tag in prose has
+// no JSON body and is left alone.
+func stripLeakedJSONToolCallBlocks(text string) string {
+	if text == "" || !strings.Contains(text, toolcall.JSONToolCallOpen) {
+		return text
+	}
+	var b strings.Builder
+	pos := 0
+	lower := strings.ToLower(text)
+	for pos < len(text) {
+		open := strings.Index(lower[pos:], toolcall.JSONToolCallOpen)
+		if open < 0 {
+			b.WriteString(text[pos:])
+			break
+		}
+		start := pos + open
+		bodyStart := start + len(toolcall.JSONToolCallOpen)
+		closeRel := strings.Index(lower[bodyStart:], toolcall.JSONToolCallClose)
+		if closeRel < 0 {
+			b.WriteString(text[pos:])
+			break
+		}
+		bodyEnd := bodyStart + closeRel
+		if len(toolcall.ParseJSONToolCallBody(text[bodyStart:bodyEnd])) == 0 {
+			b.WriteString(text[pos:bodyStart])
+			pos = bodyStart
+			continue
+		}
+		b.WriteString(text[pos:start])
+		pos = bodyEnd + len(toolcall.JSONToolCallClose)
+	}
+	return b.String()
 }
 
 func stripLeakedToolCallWrapperBlocks(text string) string {
